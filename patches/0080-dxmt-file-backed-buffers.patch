@@ -1,0 +1,207 @@
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index db46cda..a85cb17 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -687,6 +687,174 @@ madeira_cpu_cache_mode(MTLResourceOptions options) {
+   return keep ? options : (options & ~(MTLResourceOptions)MTLResourceCPUCacheModeMask);
+ }
+ 
++/* 0080: FILE-BACKED HOST BUFFERS (opt-in: madeira.cfg buffer-swap-kb = N, 0 = off).
++ *
++ * A D3D11 buffer the game creates with data (meshes, vertex and index buffers,
++ * constant data) is a shared MTLBuffer from Metal's own allocator: IOAccelerator
++ * memory, charged in full to phys_footprint whether it is resident or compressed.
++ * Rust's load makes ~96,000 of them, 2.1 GB, and the 6144 MB jetsam limit ends
++ * the process at the "Opening scene" step.
++ *
++ * Dirty pages of a MAP_SHARED file mapping are not charged (ml1076 canary, the
++ * ml1077 swap tier). So for a CPU-visible buffer of at least N KB this hands
++ * Metal memory carved out of such a mapping (newBufferWithBytesNoCopy) instead
++ * of its own. DXMT already supports a buffer that brings its own memory
++ * (CpuPlaced); the contents pointer it gets back is simply ours.
++ *
++ * Whether Metal/IOKit keep the pages of a no-copy buffer wired, and so charged,
++ * is the open question the device run answers (see the [bufswap] lines). Every
++ * failure falls back to Metal's own allocation. */
++#include <pthread.h>
++#define BUFSWAP_PAGE       16384ull
++#define BUFSWAP_CHUNK      (256ull << 20)
++#define BUFSWAP_MAX_CHUNKS 96
++#define BUFSWAP_CLASSES    128
++static struct {
++  int state;                              /* 0 = not read yet, 1 = on, -1 = off */
++  int fd;
++  uint64_t min_bytes, cap_bytes;
++  pthread_mutex_t mu;
++  char *chunk[BUFSWAP_MAX_CHUNKS];
++  uint64_t bump;                          /* next never-used file offset */
++  struct { uint64_t size; uint64_t *off; unsigned n, cap; } cls[BUFSWAP_CLASSES];
++  unsigned ncls;
++  uint64_t live, peak, logged_peak;
++  unsigned long nbuf, nlive, nfall, nnil, npunch_fail;
++} g_bufswap = { .mu = PTHREAD_MUTEX_INITIALIZER, .fd = -1 };
++
++/* Size classes: exact up to 8 pages, then four steps per power of two. Unused
++ * pages of a file extent cost nothing (sparse), so the rounding is free. */
++static uint64_t bufswap_class_size(uint64_t bytes) {
++  uint64_t pages = (bytes + BUFSWAP_PAGE - 1) / BUFSWAP_PAGE;
++  if (pages <= 8) return pages * BUFSWAP_PAGE;
++  uint64_t top = 1; while (top * 2 < pages) top *= 2;          /* top < pages <= 2*top */
++  uint64_t step = top / 4;
++  return ((pages + step - 1) / step) * step * BUFSWAP_PAGE;
++}
++static int bufswap_class_idx(uint64_t size) {                  /* caller holds mu */
++  for (unsigned i = 0; i < g_bufswap.ncls; i++) if (g_bufswap.cls[i].size == size) return (int)i;
++  if (g_bufswap.ncls >= BUFSWAP_CLASSES) return -1;
++  g_bufswap.cls[g_bufswap.ncls].size = size;
++  return (int)g_bufswap.ncls++;
++}
++static int bufswap_enabled(void) {
++  if (g_bufswap.state) return g_bufswap.state > 0;
++  pthread_mutex_lock(&g_bufswap.mu);
++  if (!g_bufswap.state) {
++    long long kb = madeira_cfg_int("buffer-swap-kb", 0);
++    const char *e = getenv("MADEIRA_BUFFER_SWAP_KB");
++    if (e && *e) kb = atoll(e);
++    g_bufswap.state = -1;
++    if (kb > 0) {
++      long long mb = madeira_cfg_int("buffer-swap-mb", 8192);
++      if (mb < 256) mb = 256;
++      NSString *dir = NSTemporaryDirectory();
++      const char *sw = getenv("MADEIRA_SWAP_FILE");
++      if (sw && *sw) dir = [[NSString stringWithUTF8String:sw] stringByDeletingLastPathComponent];
++      NSString *path = [dir stringByAppendingPathComponent:@"madeira-bufswap.bin"];
++      [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
++#if TARGET_OS_IOS
++      [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:@{NSFileProtectionKey: NSFileProtectionNone}];
++#else
++      [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
++#endif
++      int fd = open(path.fileSystemRepresentation, O_RDWR | O_CLOEXEC);
++      if (fd >= 0 && !ftruncate(fd, (off_t)(BUFSWAP_MAX_CHUNKS * BUFSWAP_CHUNK))) {
++        unlink(path.fileSystemRepresentation);   /* nothing left behind if the app dies */
++        g_bufswap.fd = fd;
++        g_bufswap.min_bytes = (uint64_t)kb << 10;
++        if (g_bufswap.min_bytes < BUFSWAP_PAGE) g_bufswap.min_bytes = BUFSWAP_PAGE;
++        g_bufswap.cap_bytes = (uint64_t)mb << 20;
++        g_bufswap.state = 1;
++        dprintf(STDERR_FILENO, "[bufswap] 0080 file-backed buffers ON: buffers of at least %llu KB, live cap %lld MB, %s (madeira.cfg buffer-swap-kb / buffer-swap-mb)\n",
++                (unsigned long long)(g_bufswap.min_bytes >> 10), mb, path.UTF8String);
++      } else {
++        dprintf(STDERR_FILENO, "[bufswap] 0080 cannot create the backing file %s (errno %d): off\n", path.UTF8String, errno);
++        if (fd >= 0) close(fd);
++      }
++    }
++  }
++  pthread_mutex_unlock(&g_bufswap.mu);
++  return g_bufswap.state > 0;
++}
++/* Carve `bytes` (rounded to a size class) out of the file mapping. NULL = use Metal's own. */
++static void *bufswap_alloc(uint64_t bytes, size_t *out_len) {
++  uint64_t size = bufswap_class_size(bytes);
++  void *ret = NULL;
++  if (size > BUFSWAP_CHUNK) return NULL;
++  pthread_mutex_lock(&g_bufswap.mu);
++  if (g_bufswap.live + size <= g_bufswap.cap_bytes) {
++    int ci = bufswap_class_idx(size);
++    uint64_t off = (uint64_t)-1;
++    if (ci >= 0 && g_bufswap.cls[ci].n) off = g_bufswap.cls[ci].off[--g_bufswap.cls[ci].n];
++    else {
++      uint64_t b = g_bufswap.bump;
++      if ((b % BUFSWAP_CHUNK) + size > BUFSWAP_CHUNK) b = (b / BUFSWAP_CHUNK + 1) * BUFSWAP_CHUNK;
++      if (b + size <= BUFSWAP_MAX_CHUNKS * BUFSWAP_CHUNK) { off = b; g_bufswap.bump = b + size; }
++    }
++    if (off != (uint64_t)-1) {
++      unsigned c = (unsigned)(off / BUFSWAP_CHUNK);
++      if (!g_bufswap.chunk[c]) {
++        void *m = mmap(NULL, BUFSWAP_CHUNK, PROT_READ | PROT_WRITE, MAP_SHARED, g_bufswap.fd, (off_t)(c * BUFSWAP_CHUNK));
++        if (m != MAP_FAILED) g_bufswap.chunk[c] = m;
++      }
++      if (g_bufswap.chunk[c]) {
++        ret = g_bufswap.chunk[c] + (off % BUFSWAP_CHUNK);
++        *out_len = (size_t)size;
++        g_bufswap.live += size; g_bufswap.nlive++; g_bufswap.nbuf++;
++        if (g_bufswap.live > g_bufswap.peak) g_bufswap.peak = g_bufswap.live;
++        if (g_bufswap.peak >= g_bufswap.logged_peak + (512ull << 20) || g_bufswap.nbuf == 1) {
++          g_bufswap.logged_peak = g_bufswap.peak;
++          dprintf(STDERR_FILENO, "[bufswap] 0080 live %llu MB in %lu buffers (peak %llu MB, %lu created, %lu fell back to Metal, %lu refused by Metal)\n",
++                  (unsigned long long)(g_bufswap.live >> 20), g_bufswap.nlive, (unsigned long long)(g_bufswap.peak >> 20),
++                  g_bufswap.nbuf, g_bufswap.nfall, g_bufswap.nnil);
++        }
++      } else if (ci >= 0 && off != (uint64_t)-1) {
++        /* the chunk could not be mapped: keep the extent for a later try */
++        if (g_bufswap.cls[ci].n == g_bufswap.cls[ci].cap) {
++          unsigned nc = g_bufswap.cls[ci].cap ? g_bufswap.cls[ci].cap * 2 : 256;
++          uint64_t *p = realloc(g_bufswap.cls[ci].off, nc * sizeof(uint64_t));
++          if (p) { g_bufswap.cls[ci].off = p; g_bufswap.cls[ci].cap = nc; }
++        }
++        if (g_bufswap.cls[ci].n < g_bufswap.cls[ci].cap) g_bufswap.cls[ci].off[g_bufswap.cls[ci].n++] = off;
++      }
++    }
++  }
++  if (!ret) g_bufswap.nfall++;
++  pthread_mutex_unlock(&g_bufswap.mu);
++  return ret;
++}
++static void bufswap_free(void *p, uint64_t len) {
++  uint64_t off = 0; unsigned c;
++  pthread_mutex_lock(&g_bufswap.mu);
++  for (c = 0; c < BUFSWAP_MAX_CHUNKS; c++)
++    if (g_bufswap.chunk[c] && (char *)p >= g_bufswap.chunk[c] && (char *)p < g_bufswap.chunk[c] + BUFSWAP_CHUNK) {
++      off = (uint64_t)c * BUFSWAP_CHUNK + (uint64_t)((char *)p - g_bufswap.chunk[c]);
++      break;
++    }
++  if (c < BUFSWAP_MAX_CHUNKS) {
++    struct fpunchhole ph = { 0, 0, (off_t)off, (off_t)len };
++    int ci = bufswap_class_idx(len);
++    if (fcntl(g_bufswap.fd, F_PUNCHHOLE, &ph)) g_bufswap.npunch_fail++;   /* stale bytes are harmless, only disk */
++    if (ci >= 0) {
++      if (g_bufswap.cls[ci].n == g_bufswap.cls[ci].cap) {
++        unsigned nc = g_bufswap.cls[ci].cap ? g_bufswap.cls[ci].cap * 2 : 256;
++        uint64_t *np = realloc(g_bufswap.cls[ci].off, nc * sizeof(uint64_t));
++        if (np) { g_bufswap.cls[ci].off = np; g_bufswap.cls[ci].cap = nc; }
++      }
++      if (g_bufswap.cls[ci].n < g_bufswap.cls[ci].cap) g_bufswap.cls[ci].off[g_bufswap.cls[ci].n++] = off;
++    }
++    if (g_bufswap.live >= len) g_bufswap.live -= len;
++    if (g_bufswap.nlive) g_bufswap.nlive--;
++  }
++  pthread_mutex_unlock(&g_bufswap.mu);
++}
++/* A buffer the game fills through its mapped pointer (CPU-visible, default cache mode). */
++static int bufswap_eligible(const struct WMTBufferInfo *bi) {
++  unsigned storage = ((unsigned)bi->options >> 4) & 0xf;   /* 0 shared, 1 managed (shared on Apple GPUs), 2 private */
++  return storage <= 1 && bufswap_enabled() && (uint64_t)bi->length >= g_bufswap.min_bytes;
++}
++
+ static NTSTATUS
+ _MTLDevice_newBuffer(void *obj) {
+   struct unixcall_mtldevice_newbuffer *params = obj;
+@@ -804,8 +972,25 @@ _MTLDevice_newBuffer(void *obj) {
+                                       options:madeira_cpu_cache_mode((MTLResourceOptions)info->options)
+                                   deallocator:NULL];
+   } else {
+-    buffer = [device newBufferWithLength:info->length options:madeira_cpu_cache_mode((MTLResourceOptions)info->options)];
+-    info->memory.ptr = [buffer storageMode] == MTLStorageModePrivate ? NULL : [buffer contents];
++    buffer = nil;
++    if (bufswap_eligible(info)) {   /* 0080 */
++      size_t flen = 0;
++      void *fp = bufswap_alloc(info->length, &flen);
++      if (fp) {
++        buffer = [device newBufferWithBytesNoCopy:fp length:flen
++                                          options:madeira_cpu_cache_mode((MTLResourceOptions)info->options)
++                                      deallocator:^(void *ptr, NSUInteger len) { bufswap_free(ptr, len); }];
++        if (buffer) info->memory.ptr = fp;
++        else {
++          bufswap_free(fp, flen);
++          pthread_mutex_lock(&g_bufswap.mu); g_bufswap.nnil++; pthread_mutex_unlock(&g_bufswap.mu);
++        }
++      }
++    }
++    if (!buffer) {
++      buffer = [device newBufferWithLength:info->length options:madeira_cpu_cache_mode((MTLResourceOptions)info->options)];
++      info->memory.ptr = [buffer storageMode] == MTLStorageModePrivate ? NULL : [buffer contents];
++    }
+   }
+   params->ret = (obj_handle_t)buffer;
+   info->gpu_address = [buffer gpuAddress];

@@ -1,0 +1,24 @@
+.DS_Store
+vendor/*
+!vendor/Madeira
+build/
+*.exe
+factorio*/
+Factorio_*/
+Factorio_*.zip
+app/RuntimeStage
+app/*.xcodeproj
+dist/
+
+# The maintainer's own build identity and machine paths
+app/Config/Local.xcconfig
+tools/local.env
+.build/
+.swiftpm/
+app/Vendor/
+
+# Compiled objects are build output, never source
+*.o
+
+# Output of tools/release.sh (holds this machine's paths)
+release.log

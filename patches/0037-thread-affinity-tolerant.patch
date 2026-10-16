@@ -1,0 +1,98 @@
+diff --git a/build/ntdll-unix/thread_ios.c b/build/ntdll-unix/thread_ios.c
+index 06cff5f..9f3c801 100644
+--- a/build/ntdll-unix/thread_ios.c
++++ b/build/ntdll-unix/thread_ios.c
+@@ -2603,6 +2603,7 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+     {
+         THREAD_BASIC_INFORMATION info;
+         const ULONG_PTR affinity_mask = get_system_affinity_mask();
++        int aff_was_zero = 0;
+ 
+         SERVER_START_REQ( get_thread_info )
+         {
+@@ -2614,6 +2615,7 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+                 info.ClientId.UniqueProcess = ULongToHandle(reply->pid);
+                 info.ClientId.UniqueThread  = ULongToHandle(reply->tid);
+                 info.AffinityMask           = reply->affinity & affinity_mask;
++                if (!info.AffinityMask) { info.AffinityMask = affinity_mask; aff_was_zero = 1; }   /* Porthole 0037: SetThreadAffinityMask returns this as the old mask, and 0 reads as failure */
+                 info.Priority               = reply->priority;
+                 info.BasePriority           = reply->base_priority;
+             }
+@@ -2628,9 +2630,20 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+                 else
+                     info.TebBaseAddress = NULL;
+             }
++            if (aff_was_zero)
++            {
++                static int seen;
++                if (seen++ < 6) dprintf( 2, "[affinity] 0037 ThreadBasicInformation handle=%p stored affinity was empty: reporting the system mask 0x%llx\n",
++                                         handle, (unsigned long long)affinity_mask );
++            }
+             if (data) memcpy( data, &info, min( length, sizeof(info) ));
+             if (ret_len) *ret_len = min( length, sizeof(info) );
+         }
++        else
++        {
++            static int noted;
++            if (noted++ < 8) dprintf( 2, "[affinity] 0037 ThreadBasicInformation for handle %p failed: %08x\n", handle, (unsigned)status );
++        }
+         return status;
+     }
+ 
+@@ -2643,7 +2656,7 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
+         {
+             req->handle = wine_server_obj_handle( handle );
+             req->access = THREAD_QUERY_INFORMATION;
+-            if (!(status = wine_server_call( req ))) affinity = reply->affinity & affinity_mask;
++            if (!(status = wine_server_call( req ))) affinity = (reply->affinity & affinity_mask) ? (reply->affinity & affinity_mask) : affinity_mask;   /* 0037 */
+         }
+         SERVER_END_REQ;
+         if (status == STATUS_SUCCESS)
+@@ -2970,9 +2983,28 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
+         const ULONG_PTR affinity_mask = get_system_affinity_mask();
+         ULONG_PTR req_aff;
+ 
++        {   /* Porthole 0037: every one of the first dozen requests, with what came of it (see below) */
++            static int seen;
++            if (seen++ < 12)
++                dprintf( 2, "[affinity] 0037 NtSetInformationThread(ThreadAffinityMask) handle=%p length=%u data=0x%llx system=0x%llx\n",
++                         handle, (unsigned)length, data && length >= sizeof(ULONG_PTR) ? (unsigned long long)*(const ULONG_PTR *)data : 0ull,
++                         (unsigned long long)affinity_mask );
++        }
+         if (length != sizeof(ULONG_PTR)) return STATUS_INVALID_PARAMETER;
+         req_aff = *(const ULONG_PTR *)data & affinity_mask;
+-        if (!req_aff) return STATUS_INVALID_PARAMETER;
++        if (!req_aff)
++        {
++            /* Porthole 0037: nothing is pinned on iOS anyway, and a program that computes its own core numbers (Intel Embree takes them
++             * from the CPUID topology the emulator reports, SMT threads included, so a thread can be asked for core 12 on a 9-processor
++             * system) read this as a failure: SetThreadAffinityMask returned 0, Embree wrote "Warning: SetThreadAffinityMask failed" to
++             * std::cerr, whose object in the C++ runtime was never constructed, and Counter-Strike 2 crashed on a null stream every time
++             * (embree3.dll+0x1bec). Accept the request and keep the thread's mask as it was. */
++            static int noted;
++            if (noted++ < 6)
++                dprintf( 2, "[affinity] 0037 mask 0x%llx has no processor in the system mask 0x%llx: accepted, not applied\n",
++                         (unsigned long long)*(const ULONG_PTR *)data, (unsigned long long)affinity_mask );
++            return STATUS_SUCCESS;
++        }
+         { extern volatile long long ios_affinity_sets; __sync_fetch_and_add( &ios_affinity_sets, 1 ); }   /* ml1117 */
+ 
+         SERVER_START_REQ( set_thread_info )
+@@ -2983,6 +3015,17 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
+             status = wine_server_call( req );
+         }
+         SERVER_END_REQ;
++        if (status)
++        {
++            /* Porthole 0037: the server refused (its idea of the process affinity can differ from ntdll's system mask, or the handle
++             * lacks THREAD_SET_INFORMATION): nothing is pinned on iOS either way, and Embree turns the failure into a warning on an
++             * std::cerr that does not exist (CS2 crash). Say which, once per kind, and report success. */
++            static int noted;
++            if (noted++ < 8)
++                dprintf( 2, "[affinity] 0037 set_thread_info(affinity 0x%llx, system 0x%llx) returned %08x for handle %p: accepted\n",
++                         (unsigned long long)req_aff, (unsigned long long)affinity_mask, (unsigned)status, handle );
++            status = STATUS_SUCCESS;
++        }
+         return status;
+     }
+ 

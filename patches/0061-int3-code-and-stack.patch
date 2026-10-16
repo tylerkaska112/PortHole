@@ -1,0 +1,54 @@
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -1956,6 +1956,51 @@
+                     dprintf(STDERR_FILENO,
+                             "[int3-guest] guest_rip=0x%llx x28=0x%llx read=%d rev=ml554\n",
+                             (unsigned long long)grip, (unsigned long long)x28v, ok);
++                    /* Porthole 0061: how did the guest get to this int3? Black Ops 3's threads all execute an int3 at ONE address in the exe's own code
++                     * (0x...364a0) and nothing on this port catches it (Windows would crash too unless it is a patched-over byte or the end of a
++                     * function the control flow should never have reached). The code around it, and the guest stack at that moment. */
++                    {
++                        static int int3_dumped;
++                        if (ok && int3_dumped < 3)
++                        {
++                            uint64_t stk[24];
++                            mach_vm_size_t sg = 0;
++                            int3_dumped++;
++                            ios_dump_x86_code( "int3-code", grip - 1, 0xa0, 0x80 );
++                            /* Porthole 0062: is the int3's page an anonymous JIT alias (the game allocated RWX memory, the engine dual-maps it)? Then the
++                             * three views must agree: the guest VA FEX decodes from, the pool RX alias and the pool RW alias that emulated stores write.
++                             * ml639/ml640 found the guest VA detaching from the pool pages once before. */
++                            {
++                                extern int ios_jit_anon_alias_find_cover(void *, size_t, void **, void **);
++                                void *cov_rw = NULL, *cov_rx = NULL;
++                                uint64_t pgb = (grip - 1) & ~0x3fffull;
++                                int cov = ios_jit_anon_alias_find_cover( (void *)(uintptr_t)pgb, 0x4000, &cov_rw, &cov_rx );
++                                dprintf( STDERR_FILENO, "[int3-guest] alias: page=0x%llx covered=%d rw=%p rx=%p\n", (unsigned long long)pgb, cov, cov_rw, cov_rx );
++                                if (cov)
++                                {
++                                    unsigned off = (unsigned)((grip - 1) & 0x3fff), w;
++                                    uint8_t gv[48], rwv[48], rxv[48];
++                                    mach_vm_size_t g1 = 0, g2 = 0, g3 = 0;
++                                    unsigned o = off >= 0x20 ? off - 0x20 : 0;
++                                    char a[100], b[100], c[100];
++                                    if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(pgb + o), 48, (mach_vm_address_t)gv, &g1 ) == KERN_SUCCESS &&
++                                        mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)((uintptr_t)cov_rw + o), 48, (mach_vm_address_t)rwv, &g2 ) == KERN_SUCCESS &&
++                                        mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)((uintptr_t)cov_rx + o), 48, (mach_vm_address_t)rxv, &g3 ) == KERN_SUCCESS)
++                                    {
++                                        for (w = 0; w < 48; w++) { snprintf( a + w * 2, 3, "%02x", gv[w] ); snprintf( b + w * 2, 3, "%02x", rwv[w] ); snprintf( c + w * 2, 3, "%02x", rxv[w] ); }
++                                        dprintf( STDERR_FILENO, "[int3-guest] alias views at page+0x%x: guest=%s\n[int3-guest] alias views at page+0x%x: poolRW=%s\n[int3-guest] alias views at page+0x%x: poolRX=%s\n", o, a, o, b, o, c );
++                                    }
++                                }
++                            }
++                            if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)gregs[4], sizeof(stk), (mach_vm_address_t)stk, &sg ) == KERN_SUCCESS && sg == sizeof(stk))
++                            {
++                                int w;
++                                for (w = 0; w < 24; w += 4)
++                                    dprintf( STDERR_FILENO, "[int3-guest] stack [rsp+0x%02x]: %016llx %016llx %016llx %016llx\n", w * 8, (unsigned long long)stk[w],
++                                             (unsigned long long)stk[w + 1], (unsigned long long)stk[w + 2], (unsigned long long)stk[w + 3] );
++                            }
++                        }
++                    }
+                     if (ok)
+                     {
+                         /* ml578: the GUEST register file — 16 entries, FEX order.

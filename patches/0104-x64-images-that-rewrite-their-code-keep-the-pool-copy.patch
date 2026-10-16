@@ -1,0 +1,31 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-11 21:59:26
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-11 21:59:27
+@@ -12486,6 +12486,28 @@
+             if (++n_hybrid <= 4) dprintf( 2, "[x64-image] 0029 %p+0x%lx is ARM64EC (CHPE metadata): keeps the pool copy\n",
+                                           (void *)b, (unsigned long)view->size );
+             return 0;
++        }
++    }
++    /* 0104: an image that declares an executable AND writable section rewrites its own code (packers and anti-tamper such as Rockstar's Launcher.exe,
++     * RockstarService.exe and EMP.dll do). With no pool copy a store into such a page is a store into a page the host keeps read-only; it was "handled"
++     * as self-modifying code and then faulted again, 233,000 times in one RDR2 run, until the process was ended. These keep the pool copy (the way
++     * they worked before 0029); big plain images such as libcef.dll, which have no such section, still go without one. */
++    {
++        unsigned int i, nsec = nt.FileHeader.NumberOfSections;
++        size_t sec_off = (size_t)lfanew + offsetof( IMAGE_NT_HEADERS64, OptionalHeader ) + nt.FileHeader.SizeOfOptionalHeader;
++        static unsigned long n_smc;
++        for (i = 0; i < nsec && i < 96; i++)
++        {
++            IMAGE_SECTION_HEADER sh;
++            if (sec_off + (size_t)(i + 1) * sizeof(sh) > view->size) break;
++            if (!ios_safe_read( b + sec_off + (size_t)i * sizeof(sh), &sh, sizeof(sh) )) break;
++            if ((sh.Characteristics & IMAGE_SCN_MEM_EXECUTE) && (sh.Characteristics & IMAGE_SCN_MEM_WRITE))
++            {
++                if (++n_smc <= 12)
++                    dprintf( 2, "[x64-image] 0104 %p+0x%lx has an executable+writable section (%.8s): rewrites its own code, keeps the pool copy\n",
++                             (void *)b, (unsigned long)view->size, (const char *)sh.Name );
++                return 0;
++            }
+         }
+     }
+     if (++n_data <= 24)

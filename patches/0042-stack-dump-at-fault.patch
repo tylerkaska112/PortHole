@@ -1,0 +1,14 @@
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -5673,6 +5673,11 @@
+                                     (unsigned long long)buf[9],
+                                     (unsigned long long)buf[10],
+                                     (unsigned long long)buf[11]);
++                                /* Porthole 0042: the guest stack around RSP, once (the name the game looks up may be built there). */
++                                {
++                                    static int stack_done;
++                                    if (!stack_done) { stack_done = 1; ios_dump_x86_code( "stack", live_rsp, 0x800, 0xa00 ); }
++                                }
+ 
+                                 /* ml382 CALLER HUNT for the "-1 pointer" family.
+                                  *

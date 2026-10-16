@@ -1,0 +1,15 @@
+# Known-problem fixes for individual games
+
+Some games have one specific problem that a tiny workaround avoids. Porthole applies it automatically just before that game starts (`app/Sources/Core/GameFixes.swift`).
+A fix either sets aside a file inside that game's own folder (renamed with `.porthole-disabled`; nothing is deleted or edited) or tells Wine not to load a library for that game (`WINEDLLOVERRIDES`, set only for that launch). Each is logged as `[game-fix]` in Settings ▸ Log.
+Verifying or updating the game in Steam brings the file back; Porthole sets it aside again at the next launch. To undo a fix yourself, remove `.porthole-disabled` from the file name.
+
+| Game | Steam app | What is set aside | Why |
+|---|---|---|---|
+| The Forest | 242760 | `TheForest_Data/Plugins/OVRPlugin.dll` (and the same name in `TheForest_Data/Mono`); Wine is told not to load `avrt.dll` | The pool leaks twice. 1) Unity tries to load the Oculus VR plugin six times. It can never load here (it needs Windows video libraries that don't exist), and each failed attempt still uses about 28 MB of the emulator's code pool, which is only returned when a whole emulated process exits. After six attempts plus the other libraries the 624 MB pool is full and the game freezes at the menu (fixed in 0.50.3: it then reached the loading screen). 2) Once the world loads, Unity's short-lived threads (about 400 in a session) each load `avrt.dll` (0.5 MB) and unload it again; 292 reloads used 146 MB and filled the pool a second time (0.50.4). Diagnosed from two device logs, 2026-10-03. |
+| Assetto Corsa | 244210 | nothing hidden; started without Steam's launch, running `acs.exe` instead of `AssettoCorsa.exe`, with its own Steam app id and folder published | `AssettoCorsa.exe` is a .NET launcher. Wine has no Mono here ("Wine Mono is not installed", then the program exits with code -1). Starting through Steam fails too: Valve's client signs in, then refuses with launch error 17 ("content this game depends on"), and would run the same launcher. The game is `acs.exe` (32-bit). Found from two device logs, 2026-10-03; whether `acs.exe` also needs a running Steam client is untested. |
+| Rust | 252490 | nothing hidden; `RustClient.exe` is started next to Valve's signed-in client instead of asking Steam to launch `Rust.exe` | `Rust.exe` starts Easy Anti-Cheat, which does not run here. `RustClient.exe` is the game and plays on servers that do not require it. Valve's client only starts what its launch list names, so the Dock host (patch 0075) starts the program itself, inside the verified install folder, with Steam's client running and `SteamAppId` set. Not verified on a device. |
+
+The proper cure is in the engine (give pool space back when a library fails to load or unloads); see `docs/ENGINE.md` for what a change there means for compatibility badges.
+
+The thread-table half of The Forest's trouble is fixed in the engine instead (`patches/0012-thread-registry-reuse.md`, engine 40d5e74-r1): about 2000 short-lived audio threads in four minutes had filled its 512-entry table.

@@ -1,0 +1,146 @@
+diff --git a/build/win32u-unix/driver_ios.c b/build/win32u-unix/driver_ios.c
+index e1d5605..82ff5a6 100644
+--- a/build/win32u-unix/driver_ios.c
++++ b/build/win32u-unix/driver_ios.c
+@@ -799,6 +799,44 @@ static void winios_drv_window_pos_changed( HWND hwnd, HWND insert_after, HWND ow
+         (get_window_long( hwnd, GWL_STYLE ) & WS_VISIBLE))
+         NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
+ 
++    /* f4-0009: a window that is built hidden gets its real surface only when it is
++     * shown, and winios_CreateWindowSurface hands wine a BLANK one (the old content
++     * is dropped). wine repaints only what is invalidated, so a dialog whose
++     * children painted while it was hidden (NSIS, WiX/MSI) shows nothing or only
++     * the part that was invalidated later (e.g. the controls on hover). Whenever a
++     * visible window is handed a surface we have not seen it with, invalidate the
++     * whole window and its children so every control repaints into it. */
++    if (winios_desktop_mode() && surface && !IsRectEmpty( &new_rects->visible ) && !(swp_flags & SWP_HIDEWINDOW))
++    {
++        static pthread_mutex_t seen_lock = PTHREAD_MUTEX_INITIALIZER;
++        static struct { HWND hwnd; struct window_surface *surface; } seen[128];
++        static unsigned seen_next;
++        int fresh = 1;
++        unsigned i;
++
++        pthread_mutex_lock( &seen_lock );
++        for (i = 0; i < ARRAY_SIZE(seen); i++)
++        {
++            if (seen[i].hwnd != hwnd) continue;
++            fresh = seen[i].surface != surface;
++            seen[i].surface = surface;
++            break;
++        }
++        if (i == ARRAY_SIZE(seen))
++        {
++            i = seen_next++ % ARRAY_SIZE(seen);
++            seen[i].hwnd = hwnd;
++            seen[i].surface = surface;
++        }
++        pthread_mutex_unlock( &seen_lock );
++
++        if (fresh)
++        {
++            dprintf( 2, "[f4-0009] new surface %p for visible hwnd=%p -> invalidate whole window\n", surface, hwnd );
++            NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
++        }
++    }
++
+     if (winios_pWindowPosChanged)
+         winios_pWindowPosChanged( hwnd, insert_after, owner_hint, swp_flags, new_rects, surface );
+ }
+diff --git a/build/win32u-unix/message_ios.c b/build/win32u-unix/message_ios.c
+index 954246e..352f4a6 100644
+--- a/build/win32u-unix/message_ios.c
++++ b/build/win32u-unix/message_ios.c
+@@ -482,6 +482,17 @@ static BOOL init_window_call_params( struct win_proc_params *params, HWND hwnd,
+         }
+     }
+ 
++    /* f4-0010: MADEIRA_MSGTRACE=1 logs every message that reaches a window procedure
++     * (the trace channels are compiled out of this build). Noise filtered out. */
++    {
++        static int trace = -1;
++        static unsigned trace_n;
++        if (trace < 0) { const char *e = getenv("MADEIRA_MSGTRACE"); trace = (e && *e == '1'); }
++        if (trace && msg != 0x84 && msg != 0x20 && msg != 0x113 && msg != 0x118 && trace_n++ < 3000)
++            fprintf( stderr, "[f4-msg] hwnd=%p msg=0x%x w=%llx l=%llx dlg=%d\n", hwnd, msg,
++                     (unsigned long long)wParam, (unsigned long long)lParam, is_dialog );
++    }
++
+     params->hwnd = get_full_window_handle( hwnd );
+     params->msg = msg;
+     params->wparam = wParam;
+@@ -2646,6 +2657,15 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
+         HWND orig = msg->hwnd;
+ 
+         msg->hwnd = window_from_point( msg->hwnd, msg->pt, &hittest, TRUE );
++        {
++            static int trace = -1;
++            static unsigned n;
++            if (trace < 0) { const char *e = getenv("MADEIRA_MSGTRACE"); trace = (e && *e == '1'); }
++            if (trace && msg->message != WM_MOUSEMOVE && n++ < 200)
++                fprintf( stderr, "[f4-mouse] msg=0x%x pt=(%d,%d) orig=%p -> hwnd=%p hittest=%d cur_thread_win=%d\n",
++                         msg->message, (int)msg->pt.x, (int)msg->pt.y, orig, msg->hwnd, hittest,
++                         msg->hwnd ? is_current_thread_window( msg->hwnd ) : -1 );
++        }
+         if (!msg->hwnd) /* As a heuristic, try the next window if it's the owner of orig */
+         {
+             HWND next = get_window_relative( orig, GW_HWNDNEXT );
+@@ -2846,6 +2866,16 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
+             {
+                 UINT ret = send_message( msg->hwnd, WM_MOUSEACTIVATE, (WPARAM)hwndTop,
+                                          MAKELONG( hittest, msg->message ) );
++                /* f4-0011: what did the window say, and does it make us eat the press? */
++                {
++                    static unsigned n;
++                    if (n++ < 40)
++                        fprintf( stderr, "[f4-0011] WM_MOUSEACTIVATE on %p (top %p) returned %u\n", msg->hwnd, hwndTop, ret );
++                }
++                /* On this port the press is never swallowed for an "...AND EAT" answer: one user,
++                 * one screen, and a bogus 32-bit callback return would otherwise freeze the setup. */
++                if (getenv( "MADEIRA_DESKTOP" ) && (ret == MA_ACTIVATEANDEAT || ret == MA_NOACTIVATEANDEAT))
++                    ret = (ret == MA_ACTIVATEANDEAT) ? MA_ACTIVATE : MA_NOACTIVATE;
+                 switch(ret)
+                 {
+                 case MA_NOACTIVATEANDEAT:
+@@ -2858,7 +2888,18 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
+                     /* fall through */
+                 case MA_ACTIVATE:
+                 case 0:
+-                    if (!set_foreground_window( hwndTop, TRUE, FALSE )) eat_msg = TRUE;
++                    if (!set_foreground_window( hwndTop, TRUE, FALSE ))
++                    {
++                        /* f4-0011: on this port a failed activation (the server refuses it when another
++                         * thread's input is "more recent", e.g. the MSI helper process, or the window
++                         * is not yet foreground) must NOT swallow the click: wine eats the
++                         * WM_LBUTTONDOWN, the button never sees a press, and NSIS/WiX installers look
++                         * frozen. There is one user and one screen here, so deliver the click anyway. */
++                        static unsigned n;
++                        if (n++ < 20)
++                            fprintf( stderr, "[f4-0011] activation of %p refused; delivering the click anyway\n", hwndTop );
++                        if (!getenv( "MADEIRA_DESKTOP" )) eat_msg = TRUE;
++                    }
+                     break;
+                 default:
+                     WARN( "unknown WM_MOUSEACTIVATE code %d\n", ret );
+@@ -2875,6 +2916,8 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
+     send_message( msg->hwnd, WM_SETCURSOR, (WPARAM)msg->hwnd, MAKELONG( hittest, msg->message ));
+ 
+     msg->message = message;
++    if ((message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK) && getenv( "MADEIRA_MSGTRACE" ))
++        fprintf( stderr, "[f4-0011] button-down on %p: eat_msg=%d message=0x%x\n", msg->hwnd, eat_msg, message );
+     return !eat_msg;
+ }
+ 
+diff --git a/wine/dlls/wow64win/user.c b/wine/dlls/wow64win/user.c
+index fa33a054..5536a64a 100644
+--- a/wine/dlls/wow64win/user.c
++++ b/wine/dlls/wow64win/user.c
+@@ -2074,7 +2074,7 @@ NTSTATUS WINAPI wow64_NtUserCreateWindowEx( UINT *args )
+     void *params = get_ptr( &args );
+     DWORD flags = get_ulong( &args );
+     HINSTANCE client_instance = get_ptr( &args );
+-    const WCHAR *class = get_ptr( &args );
++    const WCHAR *class = get_str_or_atom( &args );   /* iOS-Madeira: atom, not pointer (debugstr_w(class) faulted with +msg) */
+     BOOL ansi = get_ulong( &args );
+ 
+     UNICODE_STRING class_name, version, window_name;

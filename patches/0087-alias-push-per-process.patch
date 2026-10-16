@@ -1,0 +1,171 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -2955,6 +2955,86 @@
+  * ml1205: a sub-floor window is pushed only through its owner's callback
+  * (ios_push_subfloor_window). */
+ static void *ios_jit_alias_pushback_peb = NULL;
++
++/* Porthole 0087: one callback per process.
++ *
++ * ios_jit_alias_pushback_cb above is a single global, replaced by every process that starts an emulator. Once a second x64 process had started (RDR2: the launcher's
++ * service starts while Launcher.exe is still loading libraries), every image the FIRST process mapped afterwards was pushed to the NEWEST process's emulator. The first
++ * process's own emulator never heard of it, FEX could not turn the pool address back into a PE address and refused the entry block ("NoExec instruction in entry block"),
++ * which is a crash for the x64 stubs inside an ARM64EC image (the delay-load stub of d2d1.dll). So each process's callback is also kept here, keyed by its PEB, and an image
++ * mapped by a process is pushed to that process's own emulator as well as to the global one (nothing that used to be delivered is withheld). */
++typedef void (*ios_alias_cb_t)(unsigned long long, unsigned long long, unsigned long long);
++#define IOS_ALIAS_CB_MAX 32
++static struct { void *peb; ios_alias_cb_t cb; int pushed; } ios_alias_cbs[IOS_ALIAS_CB_MAX];
++/* FEX keeps 256 alias entries per emulator and silently refuses the rest (IosAliasEntries FULL), after which the x64 stubs of the refused images cannot run
++ * ("NoExec instruction in entry block", pc=0). Images of OTHER processes are pushed only up to this many; the process's own images always are. */
++#define IOS_ALIAS_FOREIGN_CAP 192
++static pthread_mutex_t ios_alias_cbs_lock = PTHREAD_MUTEX_INITIALIZER;
++
++static ios_alias_cb_t ios_alias_cb_for_peb(void *peb)
++{
++    int i;
++    if (!peb) return NULL;
++    for (i = 0; i < IOS_ALIAS_CB_MAX; i++)
++        if (__atomic_load_n(&ios_alias_cbs[i].peb, __ATOMIC_ACQUIRE) == peb)
++            return __atomic_load_n(&ios_alias_cbs[i].cb, __ATOMIC_ACQUIRE);   /* NULL if it is being cleared */
++    return NULL;
++}
++
++static void ios_alias_cb_set(void *peb, ios_alias_cb_t cb)
++{
++    int i, free_slot = -1;
++    pthread_mutex_lock( &ios_alias_cbs_lock );
++    for (i = 0; i < IOS_ALIAS_CB_MAX; i++)
++    {
++        if (ios_alias_cbs[i].peb == peb) { ios_alias_cbs[i].pushed = 0; __atomic_store_n(&ios_alias_cbs[i].cb, cb, __ATOMIC_RELEASE); free_slot = -2; break; }
++        if (free_slot == -1 && !ios_alias_cbs[i].peb) free_slot = i;
++    }
++    if (free_slot >= 0)
++    {
++        ios_alias_cbs[free_slot].pushed = 0;
++        __atomic_store_n(&ios_alias_cbs[free_slot].cb, cb, __ATOMIC_RELEASE);   /* callback first: a reader that matches the PEB finds it */
++        __atomic_store_n(&ios_alias_cbs[free_slot].peb, peb, __ATOMIC_RELEASE);
++    }
++    else if (free_slot == -1)
++        dprintf(2, "[alias-push] 0087 per-process callback table FULL (%d) - peb=%p keeps only the shared callback\n", IOS_ALIAS_CB_MAX, peb);
++    pthread_mutex_unlock( &ios_alias_cbs_lock );
++}
++
++/* Push one image to the emulator behind `cb`. `mine` = the process of that emulator mapped it. Foreign images stop at IOS_ALIAS_FOREIGN_CAP so that room is left for its own. */
++static void ios_alias_push_one(ios_alias_cb_t cb, int mine, unsigned long long pe, unsigned long long jit, unsigned long long size)
++{
++    int i, slot = -1;
++    for (i = 0; i < IOS_ALIAS_CB_MAX; i++)
++        if (__atomic_load_n(&ios_alias_cbs[i].cb, __ATOMIC_ACQUIRE) == cb) { slot = i; break; }
++    if (slot >= 0)
++    {
++        int n = __atomic_load_n(&ios_alias_cbs[slot].pushed, __ATOMIC_RELAXED);
++        if (!mine && n >= IOS_ALIAS_FOREIGN_CAP)
++        {
++            static int said;
++            if (said++ < 4)
++                dprintf(2, "[alias-push] 0087 emulator of peb=%p already holds %d images: not adding the image %#llx+%#llx of another process\n",
++                        ios_alias_cbs[slot].peb, n, pe, size);
++            return;
++        }
++        __atomic_add_fetch(&ios_alias_cbs[slot].pushed, 1, __ATOMIC_RELAXED);
++    }
++    cb(pe, jit, size);
++}
++
++static void ios_alias_cb_clear(void *peb)
++{
++    int i;
++    pthread_mutex_lock( &ios_alias_cbs_lock );
++    for (i = 0; i < IOS_ALIAS_CB_MAX; i++)
++        if (ios_alias_cbs[i].peb == peb)
++        {
++            __atomic_store_n(&ios_alias_cbs[i].peb, NULL, __ATOMIC_RELEASE);   /* key first, as the reclaim of mappings does */
++            __atomic_store_n(&ios_alias_cbs[i].cb, NULL, __ATOMIC_RELEASE);
++        }
++    pthread_mutex_unlock( &ios_alias_cbs_lock );
++}
+ 
+ void ios_jit_add_mapping(void *pe_base, void *jit_base, size_t size)
+ {
+@@ -3046,9 +3126,24 @@
+         /* Loaded once: a child's exit can clear it between a test and a call. */
+         void (*cb)(unsigned long long, unsigned long long, unsigned long long) =
+             __atomic_load_n(&ios_jit_alias_pushback_cb, __ATOMIC_ACQUIRE);
++        void *mapper = ios_jit_current_peb();
++        ios_alias_cb_t own = ios_alias_cb_for_peb( mapper );
+         if (cb)
+-            cb((unsigned long long)(uintptr_t)pe_base, (unsigned long long)(uintptr_t)jit_base,
+-               (unsigned long long)size);
++            ios_alias_push_one(cb, own == cb, (unsigned long long)(uintptr_t)pe_base, (unsigned long long)(uintptr_t)jit_base,
++                               (unsigned long long)size);
++        /* 0087: and to the emulator of the process that is mapping it, when that is a different one from the above. */
++        {
++            if (own && own != cb)
++            {
++                static int said;
++                if (said++ < 8)
++                    dprintf(2, "[alias-push] 0087 image %p+0x%lx mapped by peb=%p goes to its own emulator (the shared callback belongs to peb=%p)\n",
++                            pe_base, (unsigned long)size, ios_jit_current_peb(), ios_jit_alias_pushback_peb);
++            }
++            if (own && own != cb)
++                ios_alias_push_one(own, 1, (unsigned long long)(uintptr_t)pe_base, (unsigned long long)(uintptr_t)jit_base,
++                                   (unsigned long long)size);
++        }
+     }
+ }
+ 
+@@ -3364,6 +3459,7 @@
+     int i, own_pushed = 0;
+     if (!params || !params->callback) return STATUS_INVALID_PARAMETER;
+     ios_jit_alias_pushback_peb = self;
++    ios_alias_cb_set( self, params->callback );   /* 0087 */
+     __atomic_store_n(&ios_jit_alias_pushback_cb, params->callback, __ATOMIC_RELEASE);
+ 
+     /* ml951: any sub-floor window registered before xtajit64 loaded has not been
+@@ -3384,13 +3480,32 @@
+      * with the parent entry and FEX keeps one entry per PE range, so only one
+      * of the two is pushed: the registering process's own copy if it has one,
+      * else the parent entry (ios_jit_alias_drain_wants). */
+-    for (i = 0; i < ios_jit_mapping_count; i++)
++    /* 0087: the process's own images first, then those of other processes up to the cap (an emulator holds 256 in all). */
+     {
+-        if (!ios_jit_alias_drain_wants( i, self )) continue;
+-        if (ios_jit_mappings[i].owner_peb) own_pushed++;
+-        params->callback((unsigned long long)(uintptr_t)ios_jit_mappings[i].pe_base,
+-                         (unsigned long long)(uintptr_t)ios_jit_mappings[i].jit_base,
+-                         (unsigned long long)ios_jit_mappings[i].size);
++        int pass, skipped = 0;
++        for (pass = 0; pass < 2; pass++)
++            for (i = 0; i < ios_jit_mapping_count; i++)
++            {
++                int mine;
++                if (!ios_jit_alias_drain_wants( i, self )) continue;
++                mine = !ios_jit_mappings[i].map_peb || ios_jit_mappings[i].map_peb == self || ios_jit_mappings[i].owner_peb;
++                if (mine != (pass == 0)) continue;
++                if (pass == 1 && ios_alias_cb_for_peb( self ) == params->callback)
++                {
++                    int k, n = 0;
++                    for (k = 0; k < IOS_ALIAS_CB_MAX; k++)
++                        if (ios_alias_cbs[k].peb == self) n = ios_alias_cbs[k].pushed;
++                    if (n >= IOS_ALIAS_FOREIGN_CAP) { skipped++; continue; }
++                }
++                if (ios_jit_mappings[i].owner_peb) own_pushed++;
++                { int k; for (k = 0; k < IOS_ALIAS_CB_MAX; k++) if (ios_alias_cbs[k].peb == self) ios_alias_cbs[k].pushed++; }
++                params->callback((unsigned long long)(uintptr_t)ios_jit_mappings[i].pe_base,
++                                 (unsigned long long)(uintptr_t)ios_jit_mappings[i].jit_base,
++                                 (unsigned long long)ios_jit_mappings[i].size);
++            }
++        if (skipped)
++            dprintf(2, "[alias-push] 0087 peb=%p: %d image(s) of other processes left out of its emulator (it holds %d at most)\n",
++                    self, skipped, IOS_ALIAS_FOREIGN_CAP);
+     }
+     if (own_pushed)
+         dprintf(2, "[alias-push] peb=%p registered its emulator: %d image(s) mapped to this "
+@@ -10212,6 +10327,7 @@
+      * dying, its emulator's pool copy is reclaimed below and the next image
+      * map anywhere would call freed (later reused) code. Drop the callback:
+      * the next emulator to register gets the whole table from its drain. */
++    ios_alias_cb_clear( peb );   /* 0087: its own entry, whether or not it was the shared one */
+     if (peb == ios_jit_alias_pushback_peb && ios_jit_alias_pushback_cb)
+     {
+         dprintf(2, "[alias-push] peb=%p exits while its emulator receives the alias pushes: "

@@ -1,0 +1,37 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-12 00:30:00
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-12 00:30:00
+@@ -1745,10 +1745,15 @@
+     void *xb = (void *)0x7800000000ULL, *lb = (void *)0x7800000000ULL;
+     SIZE_T xs = 0, ls = 0x600000000ULL, want = *size_ptr;
+     NTSTATUS fst, rst, st;
++    static int carved;
+ 
++    /* once: the 0.50.227 log called this twenty times for V8's later 8 GB asks, and each call released the view and reserved its lower part again, which threw
++     * away what the view's other holder had committed in the meantime (BUS fault at 0x7c00405660, 4 MB into the second half of what is PartitionAlloc's pool). */
++    if (carved) return STATUS_CONFLICTING_ADDRESSES;
+     if (!find_view( (const void *)0x7e00000000ULL, 0x1000 )) return STATUS_NO_MEMORY;
+     for (i = 0; i < ios_bigres_cnt; i++)
+         if (ios_bigres_tab[i].base == 0x7800000000ULL && ios_bigres_tab[i].committed >= 0x10000000ULL) return STATUS_NO_MEMORY;
++    carved = 1;
+     fst = NtFreeVirtualMemory( NtCurrentProcess(), &xb, &xs, MEM_RELEASE );
+     if (fst) { dprintf( 2, "[pa32] patch0113 release of the idle view refused: 0x%x\n", (unsigned)fst ); return STATUS_NO_MEMORY; }
+     rst = allocate_virtual_memory( &lb, &ls, MEM_RESERVE, PAGE_NOACCESS, 0, 0, 0, 0 );
+@@ -25271,6 +25276,18 @@
+ 
+         if (st && is_jumbo && jumbo_size == 0x200000000ULL && (type & MEM_RESERVE) && process == NtCurrentProcess() && ios_pa32_soft_enabled())
+             st = ios_pa32_sandbox_carve( ret, size_ptr, type, protect, attributes );   /* 0113 */
++        /* 0114: V8 goes on asking for 16 GB (ten random hints, each again without one) and then 8 GB, from the same code as the sandbox (nrip ...2734ac0/b3f), until
++         * it gets one. On Windows the first would succeed. They are served like 0108's random-hint reserves: a 4GB-aligned REAL start in the biggest hole, the rest soft. */
++        if (st && is_jumbo && (jumbo_size == 0x400000000ULL || jumbo_size == 0x200000000ULL) && (type & MEM_RESERVE) && process == NtCurrentProcess()
++            && ios_pa32_soft_enabled())
++        {
++            void *pb = NULL;
++            if (ios_pa32_soft_back2( jumbo_size, type, protect, &pb, 0x100000000ULL, 0x40000000ULL ) == STATUS_SUCCESS)
++            {
++                *ret = pb; *size_ptr = jumbo_size; st = STATUS_SUCCESS;
++                dprintf( 2, "[pa32] patch0114 %lu MB reserve served from a hole at %p (1 GB real, rest soft)\n", (unsigned long)(jumbo_size >> 20), pb );
++            }
++        }
+         if (st && is_jumbo) st = ios_pa32_cage_grant( process, ret, size_ptr, jumbo_size, type, protect );   /* patch 0018 */
+         if (is_jumbo) ios_jumbo_census( jumbo_hint, jumbo_size, st ? NULL : *ret, (unsigned)st );
+         if (!st && *size_ptr >= 0x10000000 && *size_ptr < 0x40000000 && (type & MEM_RESERVE))

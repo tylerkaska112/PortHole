@@ -1,0 +1,20 @@
+--- a/app/Runtime/DockInstallers.swift
++++ b/app/Runtime/DockInstallers.swift
+@@ -638,10 +638,15 @@
+         // turns madsync off for its whole session (MADEIRA_MADSYNC_SESSION=0, set by the
+         // caller); later sessions use the configured engine again.
+         // MADEIRA_DOCK_INSTALL_SERVER_SYNC=0 keeps madsync and leaves the service step out.
+-        let sessionOff = !pending.isEmpty && flag("MADEIRA_DOCK_INSTALL_SERVER_SYNC")
++        // Porthole 0085: some launchers need the service manager at EVERY start, not only while their installer runs (Rockstar's launcher runs
++        // `RockstarService.exe install` and `start` each time and quits waiting when they fail). Such a game's start gets the same service step with no program to run.
++        // MADEIRA_DOCK_SERVICES=1 asks for it for every Dock game; the Rockstar launcher in a game's install scripts asks for it by itself.
++        let wantsServices = SteamSignIn.flag("MADEIRA_DOCK_SERVICES", default: false)
++            || items.contains { $0.process.executable.lowercased().hasSuffix("\\rockstar-games-launcher.exe") }
++        let sessionOff = (!pending.isEmpty || wantsServices) && flag("MADEIRA_DOCK_INSTALL_SERVER_SYNC")
+         let services: DockInstallServices = flag("MADEIRA_DOCK_INSTALL_SCM") && (sessionOff || !madsyncConfigured)
+             ? .start(MadeiraDock.executable) : .off
+-        if !pending.isEmpty {
++        if !pending.isEmpty || wantsServices {
+             do {
+                 let text = DockInstallScripts.batch(pending, resultFile: "C:\\" + resultName, services: services)
+                 try Data(text.utf8).write(to: batchFile, options: .atomic)

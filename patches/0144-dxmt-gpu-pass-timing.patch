@@ -1,0 +1,214 @@
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -568,7 +568,193 @@
+       g_gpu_meter_last_end = end;
+     os_unfair_lock_unlock(&g_gpu_meter_lock);
+     atomic_fetch_add_explicit(&g_gpu_meter_cmdbufs, 1, memory_order_relaxed);
++  }];
++}
++
++
++/* 0144: GPU time per render pass, for the in-game profile ("Profile where the time goes").
++ *
++ * While it is on, every render pass the game starts gets two timestamps (start of its vertex stage, end of its fragment stage) in one shared MTLCounterSampleBuffer;
++ * when the command buffer has completed they are resolved and added up per kind of pass (size, attachments, load and store actions). madeira_passprof_dump() prints
++ * the table once, with the time per second of play. Costs a few hundred bytes per pass; off, nothing is attached. Needs a GPU that samples at stage boundaries
++ * (the A14 and later do); otherwise it says so in the log and stays off. */
++static _Atomic int g_pp_on;
++static id<MTLCounterSampleBuffer> g_pp_sb;
++static id<MTLDevice> g_pp_dev;
++static int g_pp_failed;
++#define PP_SAMPLES 4096u   /* the sample buffer may hold at most 32768 bytes = 4096 timestamps */
++#define PP_RECORDS 2048u
++struct pp_key { uint32_t w, h, ncolor, cfmt, dfmt, cload, cstore, dload, dstore, samples, tex_n; };
++struct pp_rec { uintptr_t cb; uint32_t si, seq; struct pp_key k; };
++struct pp_stat { struct pp_key k; uint64_t n; double ticks; };
++static struct pp_rec g_pp_rec[PP_RECORDS];
++static _Atomic uint32_t g_pp_next;
++static struct pp_stat g_pp_stat[128];
++static int g_pp_nstat;
++static os_unfair_lock g_pp_lock = OS_UNFAIR_LOCK_INIT;
++static MTLTimestamp g_pp_cpu0, g_pp_gpu0;
++static double g_pp_span_sec, g_pp_span_ticks;   /* sum over command buffers: GPUEndTime-GPUStartTime, and the timestamps between their first and last pass */
++
++void madeira_passprof_start(void) {
++  os_unfair_lock_lock(&g_pp_lock);
++  g_pp_nstat = 0;
++  memset(g_pp_stat, 0, sizeof g_pp_stat);
++  os_unfair_lock_unlock(&g_pp_lock);
++  g_pp_cpu0 = 0;   /* calibrated at the first pass */
++  atomic_store_explicit(&g_pp_on, 1, memory_order_relaxed);
++}
++
++static int madeira_pp_setup(id<MTLDevice> dev) {
++  if (g_pp_sb) return 1;
++  if (g_pp_failed) return 0;
++  g_pp_failed = 1;
++  if (![dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
++    dprintf(STDERR_FILENO, "[gpu-prof] this GPU cannot sample counters at stage boundaries -- no per-pass GPU times\n");
++    return 0;
++  }
++  id<MTLCounterSet> ts = nil;
++  for (id<MTLCounterSet> cs in dev.counterSets) if ([cs.name isEqualToString:MTLCommonCounterSetTimestamp]) ts = cs;
++  if (!ts) { dprintf(STDERR_FILENO, "[gpu-prof] no timestamp counter set -- no per-pass GPU times\n"); return 0; }
++  MTLCounterSampleBufferDescriptor *d = [[MTLCounterSampleBufferDescriptor alloc] init];
++  d.counterSet = ts; d.sampleCount = PP_SAMPLES; d.storageMode = MTLStorageModeShared; d.label = @"porthole-pass-profile";
++  NSError *err = nil;
++  g_pp_sb = [dev newCounterSampleBufferWithDescriptor:d error:&err];
++  [d release];
++  if (!g_pp_sb) { dprintf(STDERR_FILENO, "[gpu-prof] could not make the counter buffer: %s\n", err ? err.description.UTF8String : "?"); return 0; }
++  g_pp_dev = dev;
++  g_pp_failed = 0;
++  dprintf(STDERR_FILENO, "[gpu-prof] timing every render pass (counter buffer of %u samples)\n", PP_SAMPLES);
++  return 1;
++}
++
++static void madeira_pp_prepare(MTLRenderPassDescriptor *d, const struct WMTRenderPassInfo *info, id<MTLCommandBuffer> cb) {
++  if (!madeira_pp_setup(cb.device)) return;
++  if (!g_pp_cpu0) [g_pp_dev sampleTimestamps:&g_pp_cpu0 gpuTimestamp:&g_pp_gpu0];
++  uint32_t n = atomic_fetch_add_explicit(&g_pp_next, 1, memory_order_relaxed);
++  struct pp_rec *r = &g_pp_rec[n % PP_RECORDS];
++  uint32_t si = (n * 2u) % PP_SAMPLES;
++  memset(r, 0, sizeof *r);
++  struct pp_key *k = &r->k;
++  id<MTLTexture> t0 = nil;
++  for (unsigned i = 0; i < 8; i++) if (info->colors[i].texture) {
++    if (!t0) { t0 = (id<MTLTexture>)info->colors[i].texture; k->cfmt = (uint32_t)t0.pixelFormat; k->cload = info->colors[i].load_action; k->cstore = info->colors[i].store_action; }
++    k->ncolor++;
++  }
++  if (info->depth.texture) {
++    id<MTLTexture> dt = (id<MTLTexture>)info->depth.texture;
++    if (!t0) t0 = dt;
++    k->dfmt = (uint32_t)dt.pixelFormat; k->dload = info->depth.load_action; k->dstore = info->depth.store_action;
++  }
++  if (t0) { k->w = (uint32_t)t0.width; k->h = (uint32_t)t0.height; k->samples = (uint32_t)t0.sampleCount; }
++  r->si = si;
++  r->seq = n;
++  r->cb = (uintptr_t)cb;
++  MTLRenderPassSampleBufferAttachmentDescriptor *a = d.sampleBufferAttachments[0];
++  a.sampleBuffer = g_pp_sb;
++  a.startOfVertexSampleIndex = si;
++  a.endOfVertexSampleIndex = MTLCounterDontSample;
++  a.startOfFragmentSampleIndex = MTLCounterDontSample;
++  a.endOfFragmentSampleIndex = si + 1;
++}
++
++static int pp_seq_cmp(const void *a, const void *b) {
++  uint32_t x = ((const struct pp_rec *)a)->seq, y = ((const struct pp_rec *)b)->seq;
++  return x < y ? -1 : x > y;
++}
++
++/* Metal starts the vertex work of a pass long before its fragment work (the vertex stages of the passes of a command buffer overlap the fragment stages of the ones
++ * before), so end-of-fragment minus start-of-vertex is mostly waiting for the earlier passes -- a 160x90 pass came out as long as a 1280x720 one. The fragment stage runs
++ * in order, so the time a pass occupied the GPU is the gap between its end-of-fragment and the previous pass's (the first pass of a command buffer: from its own start). */
++static void madeira_pp_attach(id<MTLCommandBuffer> cmdbuf) {
++  uintptr_t cbp = (uintptr_t)cmdbuf;
++  [cmdbuf addCompletedHandler:^(id<MTLCommandBuffer> b) {
++    struct pp_rec local[96]; int nl = 0;
++    for (uint32_t i = 0; i < PP_RECORDS && nl < 96; i++) {
++      struct pp_rec *r = &g_pp_rec[i];
++      if (r->cb != cbp) continue;
++      local[nl++] = *r;
++      r->cb = 0;
++    }
++    if (!nl) return;
++    qsort(local, nl, sizeof local[0], pp_seq_cmp);
++    uint64_t prev = 0, first_sv = 0, last_ef = 0;
++    double d[96]; memset(d, 0, sizeof d);
++    for (int j = 0; j < nl; j++) {
++      NSData *data = [g_pp_sb resolveCounterRange:NSMakeRange(local[j].si, 2)];
++      if (!data || data.length < 2 * sizeof(MTLCounterResultTimestamp)) continue;
++      const MTLCounterResultTimestamp *ts = data.bytes;
++      if (ts[0].timestamp == MTLCounterErrorValue || ts[1].timestamp == MTLCounterErrorValue) continue;
++      uint64_t sv = ts[0].timestamp, ef = ts[1].timestamp;
++      if (!first_sv) first_sv = sv;
++      if (!prev) prev = sv;
++      d[j] = ef > prev ? (double)(ef - prev) : 0.0;
++      if (ef > prev) prev = ef;
++      last_ef = ef > last_ef ? ef : last_ef;
++    }
++    double sec = b.GPUEndTime - b.GPUStartTime;
++    os_unfair_lock_lock(&g_pp_lock);
++    if (sec > 0 && last_ef > first_sv) { g_pp_span_sec += sec; g_pp_span_ticks += (double)(last_ef - first_sv); }
++    for (int j = 0; j < nl; j++) {
++      int k;
++      for (k = 0; k < g_pp_nstat; k++) if (!memcmp(&g_pp_stat[k].k, &local[j].k, sizeof local[j].k)) break;
++      if (k == g_pp_nstat && g_pp_nstat < 128) { g_pp_stat[k].k = local[j].k; g_pp_nstat++; }
++      if (k < g_pp_nstat) { g_pp_stat[k].n++; g_pp_stat[k].ticks += d[j]; }
++    }
++    os_unfair_lock_unlock(&g_pp_lock);
+   }];
++}
++
++static double pp_bpp(uint32_t fmt) {
++  switch (fmt) {
++  case 10: case 12: case 253: return 1;
++  case 20: case 22: case 25: case 30: case 250: return 2;
++  case 40: case 55: case 65: case 70: case 71: case 80: case 81: case 90: case 92: case 93: case 252: return 4;
++  case 255: case 260: return 5;   /* depth 24/32 + stencil 8 (real storage may be 8) */
++  case 105: case 115: case 114: return 8;
++  case 125: return 16;
++  default: return 4;
++  }
++}
++/* bytes one pass of this kind moves between the tile memory and RAM, counting what its load and store actions ask for */
++static double pp_traffic(const struct pp_key *k) {
++  double px = (double)k->w * k->h * (k->samples ? k->samples : 1);
++  double b = 0;
++  if (k->cload == 1) b += px * pp_bpp(k->cfmt) * k->ncolor;
++  if (k->cstore == 1 || k->cstore == 3) b += px * pp_bpp(k->cfmt) * k->ncolor;
++  if (k->dfmt) { if (k->dload == 1) b += px * pp_bpp(k->dfmt); if (k->dstore == 1 || k->dstore == 3) b += px * pp_bpp(k->dfmt); }
++  return b;
++}
++
++static int pp_cmp(const void *a, const void *b) {
++  double x = ((const struct pp_stat *)a)->ticks, y = ((const struct pp_stat *)b)->ticks;
++  return x < y ? 1 : x > y ? -1 : 0;
++}
++
++void madeira_passprof_dump(double seconds) {
++  atomic_store_explicit(&g_pp_on, 0, memory_order_relaxed);
++  if (!g_pp_sb || !g_pp_cpu0) { dprintf(STDERR_FILENO, "[gpu-prof] no render passes were timed\n"); return; }
++  usleep(300000);   /* the last command buffers may still be completing */
++  struct pp_stat st[128]; int n; double span_sec, span_ticks;
++  os_unfair_lock_lock(&g_pp_lock);
++  n = g_pp_nstat; memcpy(st, g_pp_stat, sizeof st); span_sec = g_pp_span_sec; span_ticks = g_pp_span_ticks;
++  os_unfair_lock_unlock(&g_pp_lock);
++  /* seconds per timestamp tick: the command buffers' own GPU time against the timestamps between their first and last pass */
++  double ns_per_tick = span_ticks > 0 ? span_sec * 1e9 / span_ticks : 1.0;
++  qsort(st, n, sizeof st[0], pp_cmp);
++  double total = 0, traffic = 0; uint64_t passes = 0;
++  for (int i = 0; i < n; i++) { total += st[i].ticks; passes += st[i].n; traffic += st[i].n * pp_traffic(&st[i].k); }
++  dprintf(STDERR_FILENO, "[gpu-prof] %.0f s: %llu render passes, %d kinds, %.1f ms of GPU time per second spent in them (%.3f ns per timestamp tick, from %.1f s of command buffers); load/store traffic asked for: %.0f MB/s\n",
++          seconds, (unsigned long long)passes, n, seconds > 0 ? total * ns_per_tick / 1e6 / seconds : 0.0, ns_per_tick, span_sec, seconds > 0 ? traffic / 1e6 / seconds : 0.0);
++  static const char *ld[] = { "dontcare", "load", "clear" };
++  static const char *stn[] = { "dontcare", "store", "resolve", "storeresolve", "unknown", "custom" };
++  for (int i = 0; i < n && i < 24; i++) {
++    const struct pp_key *k = &st[i].k;
++    double ms_total = st[i].ticks * ns_per_tick / 1e6;
++    dprintf(STDERR_FILENO, "[gpu-prof]   %5.1f%% %6.1f ms/s  %4.1f/s of %ux%u (%ux), %u colour(s) fmt %u [%s/%s], depth fmt %u [%s/%s]: %.2f ms each, %.1f MB moved each\n",
++            total > 0 ? 100.0 * st[i].ticks / total : 0.0, seconds > 0 ? ms_total / seconds : 0.0, seconds > 0 ? st[i].n / seconds : 0.0, k->w, k->h, k->samples,
++            k->ncolor, k->cfmt, k->cload < 3 ? ld[k->cload] : "?", k->cstore < 6 ? stn[k->cstore] : "?", k->dfmt, k->dload < 3 ? ld[k->dload] : "?",
++            k->dstore < 6 ? stn[k->dstore] : "?", st[i].n ? ms_total / st[i].n : 0.0, pp_traffic(k) / 1e6);
++  }
+ }
+ 
+ static NTSTATUS
+@@ -596,6 +782,8 @@
+   }
+   if (atomic_load_explicit(&g_madeira_gpu_meter, memory_order_relaxed))
+     madeira_gpu_meter_attach((id<MTLCommandBuffer>)params->handle);
++  if (atomic_load_explicit(&g_pp_on, memory_order_relaxed) && g_pp_sb)
++    madeira_pp_attach((id<MTLCommandBuffer>)params->handle);
+   [(id<MTLCommandBuffer>)params->handle commit];
+   return STATUS_SUCCESS;
+ }
+@@ -1681,6 +1869,8 @@
+   descriptor.renderTargetWidth = info->render_target_width;
+   descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
+ 
++  if (atomic_load_explicit(&g_pp_on, memory_order_relaxed))
++    madeira_pp_prepare(descriptor, info, (id<MTLCommandBuffer>)params->handle);
+   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+ 
+   /* Count realized native passes, including clears and the final present.

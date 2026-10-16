@@ -1,0 +1,3 @@
+# 0069 live registers in the analysis dump (diagnostic)
+
+`server_ios.c`. The 0068 dump took its registers from the FEX frame (`x28+0x20`), which is only written back when the JIT code returns to its dispatcher. Black Ops 3's loop is a chain of indirect jumps that never does, so the frame showed the same registers in every sample while the host registers (0051, which varied) kept changing: the offline emulation started from a stale, inconsistent state. `ios_live_snapshot` reads the live registers of the thread (host regs mapped to x86 as in 0051, translated rip, NZCV flags). `bo3-dump3/meta.txt` gets `live_rip`, `live_cpsr`, `l0..l15`; `series.txt` has 96 snapshots 200 us apart (`rip cpsr g0..g15 note`). Same sections/stack/TEB/PEB files as 0068.

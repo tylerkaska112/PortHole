@@ -1,0 +1,291 @@
+{
+  "presets": [
+    {
+      "controls": [
+        {
+          "action": {
+            "joystickWASD": {}
+          },
+          "id": "905AAE65-694A-51AB-AAF5-C535B73D2124",
+          "nx": 0.11,
+          "ny": 0.74,
+          "scale": 1.5
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 16
+            }
+          },
+          "id": "25E4976E-C032-51CA-AC0E-AF672A039418",
+          "nx": 0.05,
+          "ny": 0.4,
+          "scale": 0.8
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 17
+            }
+          },
+          "id": "BBE59991-3BFD-5E65-9224-EF4816493F1A",
+          "nx": 0.05,
+          "ny": 0.27,
+          "scale": 0.8
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 18
+            }
+          },
+          "id": "A8E55BEB-D30A-5807-A8DB-2F729A7681CD",
+          "nx": 0.05,
+          "ny": 0.14,
+          "scale": 0.8
+        },
+        {
+          "action": {
+            "mouseRight": {}
+          },
+          "id": "903A7A72-8B76-5937-8EEB-B7AA262D1D90",
+          "nx": 0.93,
+          "ny": 0.74,
+          "scale": 1.1
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 82
+            }
+          },
+          "id": "83767879-98FD-5426-AC90-933182F2B538",
+          "nx": 0.86,
+          "ny": 0.56,
+          "scale": 0.9
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 81
+            }
+          },
+          "id": "FC03CC6A-2ACC-576A-AD81-7B8AD048D30E",
+          "nx": 0.93,
+          "ny": 0.52,
+          "scale": 0.9
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 69
+            }
+          },
+          "id": "CEC54240-50B5-5F6C-9408-5CC724C3AB08",
+          "nx": 0.8,
+          "ny": 0.74,
+          "scale": 0.9
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 32
+            }
+          },
+          "id": "8D616AEB-AA7A-5063-B08E-A3B17821371A",
+          "nx": 0.8,
+          "ny": 0.9,
+          "scale": 0.9
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 77
+            }
+          },
+          "id": "109A9465-6F1B-5A4B-8806-F72E2D1AA800",
+          "nx": 0.95,
+          "ny": 0.12,
+          "scale": 0.7
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 84
+            }
+          },
+          "id": "5A98D3A6-A740-5B72-922F-FD38BEDCCDB9",
+          "nx": 0.95,
+          "ny": 0.24,
+          "scale": 0.7
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 27
+            }
+          },
+          "id": "5EDE48B6-D104-5342-AF8E-970BDD17BB19",
+          "nx": 0.05,
+          "ny": 0.9,
+          "scale": 0.7
+        },
+        {
+          "action": {
+            "keyboardToggle": {}
+          },
+          "id": "2C00958A-D235-5C1A-8B60-BE6209711E3F",
+          "nx": 0.95,
+          "ny": 0.36,
+          "scale": 0.7
+        }
+      ],
+      "id": "user.factorio.ipad",
+      "name": "Factorio iPad"
+    },
+    {
+      "controls": [
+        {
+          "action": {
+            "joystickWASD": {}
+          },
+          "id": "9FCDFB64-AE5F-5DF8-A17B-7D9D619C3CF1",
+          "nx": 0.11,
+          "ny": 0.74,
+          "scale": 1.275
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 16
+            }
+          },
+          "id": "C3EA9FA9-ABCD-5954-BD32-B691BF3473A9",
+          "nx": 0.05,
+          "ny": 0.4,
+          "scale": 0.68
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 17
+            }
+          },
+          "id": "92E6786A-72F2-57DA-BE99-5C0644D19E7D",
+          "nx": 0.05,
+          "ny": 0.27,
+          "scale": 0.68
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 18
+            }
+          },
+          "id": "738F2D9C-0666-508C-AEF2-41C28A89F9A4",
+          "nx": 0.05,
+          "ny": 0.14,
+          "scale": 0.68
+        },
+        {
+          "action": {
+            "mouseRight": {}
+          },
+          "id": "E1818439-95B3-58B6-A070-8AD98419225A",
+          "nx": 0.93,
+          "ny": 0.74,
+          "scale": 0.935
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 82
+            }
+          },
+          "id": "425A6D6C-783E-593D-8505-57AC73306DFD",
+          "nx": 0.86,
+          "ny": 0.56,
+          "scale": 0.765
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 81
+            }
+          },
+          "id": "8FDADDD9-3C0C-57CC-9321-A77A6F4D50E2",
+          "nx": 0.93,
+          "ny": 0.52,
+          "scale": 0.765
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 69
+            }
+          },
+          "id": "2383A3C7-351A-534A-A8B4-180EA939D320",
+          "nx": 0.8,
+          "ny": 0.74,
+          "scale": 0.765
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 32
+            }
+          },
+          "id": "08086D00-EA23-5AE3-AD79-30E79AF7801E",
+          "nx": 0.8,
+          "ny": 0.9,
+          "scale": 0.765
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 77
+            }
+          },
+          "id": "438DD969-91BD-5575-A87C-E98A876B6DBF",
+          "nx": 0.95,
+          "ny": 0.12,
+          "scale": 0.595
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 84
+            }
+          },
+          "id": "8A085934-E026-5FC9-A173-3CCAB366F50B",
+          "nx": 0.95,
+          "ny": 0.24,
+          "scale": 0.595
+        },
+        {
+          "action": {
+            "key": {
+              "_0": 27
+            }
+          },
+          "id": "E12C171E-DD4C-569B-B964-088DC833ECBD",
+          "nx": 0.05,
+          "ny": 0.9,
+          "scale": 0.595
+        },
+        {
+          "action": {
+            "keyboardToggle": {}
+          },
+          "id": "146722B8-D204-5353-850C-7BB3E6633FAA",
+          "nx": 0.95,
+          "ny": 0.36,
+          "scale": 0.595
+        }
+      ],
+      "id": "user.factorio.iphone",
+      "name": "Factorio iPhone"
+    }
+  ],
+  "version": 1
+}

@@ -1,0 +1,101 @@
+diff -ruN a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
+--- a/FEXCore/Source/Interface/Core/LookupCache.h
++++ b/FEXCore/Source/Interface/Core/LookupCache.h
+@@ -180,6 +180,36 @@
+   void ClearCache(const LookupCacheWriteLockToken&);
+ };
+ 
++#ifdef FEX_IOS_HOST
++/* 0.50.345: who misses in the L1 lookup cache. A profile of The Forest showed 7 % of the main thread in LookupCache::CacheBlockMapping and its hash maps and 75-95K L1 misses
++ * a second. Counts misses where the slot held another block (a conflict: the cache is direct-mapped on the low 17 bits of the guest address) against an empty slot (cold or
++ * invalidated), and keeps the heaviest missing addresses (every 16th miss, Misra-Gries in 4096 hashed slots); written with the [l1-miss] line. */
++struct IosL1MissNotes {
++  std::atomic<uint64_t> Empty {0}, Conflict {0}, Seq {0};
++  struct Slot { std::atomic<uint64_t> Key {0}; std::atomic<uint32_t> Count {0}; };
++  Slot Tab[4096];
++  void Note(uint64_t Address, uint64_t Resident) {
++    (Resident ? Conflict : Empty).fetch_add(1, std::memory_order_relaxed);
++    if (Seq.fetch_add(1, std::memory_order_relaxed) & 15) return;
++    Slot& E = Tab[(Address * 0x9E3779B97F4A7C15ULL) >> 52];
++    if (E.Key.load(std::memory_order_relaxed) == Address) E.Count.fetch_add(1, std::memory_order_relaxed);
++    else if (E.Count.load(std::memory_order_relaxed) == 0) { E.Key.store(Address, std::memory_order_relaxed); E.Count.store(1, std::memory_order_relaxed); }
++    else E.Count.fetch_sub(1, std::memory_order_relaxed);
++  }
++  void Dump() {
++    uint64_t Key[8] = {}; uint32_t Cnt[8] = {};
++    for (auto& S : Tab) {
++      const uint32_t C = S.Count.load(std::memory_order_relaxed);
++      if (!C) continue;
++      for (int i = 0; i < 8; i++) if (C > Cnt[i]) { for (int j = 7; j > i; j--) { Key[j] = Key[j - 1]; Cnt[j] = Cnt[j - 1]; } Key[i] = S.Key.load(std::memory_order_relaxed); Cnt[i] = C; break; }
++    }
++    LogMan::Msg::EFmt("[l1-miss] slot was empty: {}, held another block: {}; heaviest missing addresses (x16): {:#x}:{} {:#x}:{} {:#x}:{} {:#x}:{} {:#x}:{} {:#x}:{} {:#x}:{} {:#x}:{}",
++                      Empty.load(), Conflict.load(), Key[0], Cnt[0], Key[1], Cnt[1], Key[2], Cnt[2], Key[3], Cnt[3], Key[4], Cnt[4], Key[5], Cnt[5], Key[6], Cnt[6], Key[7], Cnt[7]);
++  }
++};
++inline IosL1MissNotes& IosL1Notes() { static IosL1MissNotes N; return N; }
++#endif
++
+ class LookupCache {
+ public:
+   struct LookupCacheEntry {
+@@ -203,6 +233,9 @@
+     if (L1Entry.GuestCode == Address) {
+       return L1Entry.HostCode;
+     }
++#ifdef FEX_IOS_HOST
++    IosL1Notes().Note(Address, L1Entry.GuestCode);
++#endif
+ 
+     // L2 and L3 need to be locked
+     uintptr_t HostPtr {};
+@@ -265,6 +298,7 @@
+         const int64_t Now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+         const int64_t Last = IosL1LastNs.exchange(Now, std::memory_order_relaxed);
+         if (Last) LogMan::Msg::EFmt("[l1-miss] ml1124 {} L1 misses total, {:.0f}/s over the last 2^20", M, 1048576.0 * 1e9 / double(Now - Last));
++        IosL1Notes().Dump();
+       }
+     }
+ #endif
+@@ -288,7 +322,7 @@
+                                       static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(Period).count()) * 1000.0;
+ 
+       if (AveragePerSecond >= DynamicL1CacheIncreaseCountHeuristic()) {
+-        if (CurrentL1Entries < MAX_L1_ENTRIES) {
++        if (CurrentL1Entries < MAX_L1_ENTRIES || (AveragePerSecond >= HOT_L1_MISS_RATE && CurrentL1Entries < MAX_L1_ENTRIES_HOT)) {
+           CurrentL1Entries <<= 1;
+           L1PointerMask = CurrentL1Entries - 1;
+ 
+@@ -303,7 +337,7 @@
+ 
+           // Madvise the entries that we are dropping. Gives the memory back to the OS.
+           LookupCacheEntry* FirstZeroL1Entry = &reinterpret_cast<LookupCacheEntry*>(L1Pointer)[CurrentL1Entries];
+-          size_t ZeroMemorySize = (MAX_L1_ENTRIES - CurrentL1Entries) * sizeof(LookupCacheEntry);
++          size_t ZeroMemorySize = (MAX_L1_ENTRIES_HOT - CurrentL1Entries) * sizeof(LookupCacheEntry);
+           FEXCore::Allocator::VirtualDontNeed(FirstZeroL1Entry, ZeroMemorySize, false);
+ 
+           // Update the thread's L1 pointer mask to increase how much cache it uses.
+@@ -535,8 +569,15 @@
+    * 14MB ([TI-IC] lookupcache-alloc size drops 0x6000000 → 0x5200000, which
+    * doubles as the deploy marker). */
+   constexpr static size_t MAX_L1_ENTRIES = 128 * 1024; // Must be a power of 2
++  /* 0.50.346: the L1 census of The Forest (2026-10-14 23:39) found 97 % of the 75-95K L1 misses a second were conflicts (the slot held another block): the main thread's
++   * working set of block entries is larger than 128K slots. A thread whose lookups keep missing (>= HOT_L1_MISS_RATE a second reach the shared map) may grow to
++   * 512K entries (8MB); every other thread stays at 128K. Only the pages of the array a thread touches are resident. */
++  constexpr static size_t MAX_L1_ENTRIES_HOT = 512 * 1024;
++  constexpr static double HOT_L1_MISS_RATE = 20000.0;
+ #else
+   constexpr static size_t MAX_L1_ENTRIES = 1 * 1024 * 1024; // Must be a power of 2
++  constexpr static size_t MAX_L1_ENTRIES_HOT = MAX_L1_ENTRIES;
++  constexpr static double HOT_L1_MISS_RATE = 0.0;
+ #endif
+ 
+ #ifdef FEX_IOS_HOST
+@@ -555,7 +596,7 @@
+   constexpr static size_t CODE_SIZE = 128 * 1024 * 1024;
+ #endif
+   constexpr static size_t SIZE_PER_PAGE = FEXCore::Utils::FEX_PAGE_SIZE * sizeof(LookupCacheEntry);
+-  constexpr static size_t MAX_L1_SIZE = MAX_L1_ENTRIES * sizeof(LookupCacheEntry);
++  constexpr static size_t MAX_L1_SIZE = MAX_L1_ENTRIES_HOT * sizeof(LookupCacheEntry);
+ 
+   size_t AllocateOffset {};
+ 

@@ -1,0 +1,190 @@
+[
+  {
+    "clientId" : "11111111-2222-3333-4444-555555555555",
+    "game" : {
+      "kind" : "steam",
+      "steamAppID" : 427520,
+      "title" : "Factorio"
+    },
+    "name" : "Shooter layout",
+    "notes" : "FPS",
+    "pad" : {
+      "binds" : {
+        "A" : "key-F",
+        "LS" : "arrows",
+        "RT" : "lmb"
+      },
+      "mouseVertical" : 1.5
+    },
+    "touch" : {
+      "controls" : [
+        {
+          "action" : "stick-wasd",
+          "id" : "00000000-0000-0000-0000-000000000000",
+          "label" : "",
+          "mode" : "tap",
+          "size" : 120,
+          "x" : 0.13,
+          "y" : 0.72
+        },
+        {
+          "action" : "lmb",
+          "id" : "00000000-0000-0000-0000-000000000001",
+          "label" : "FIRE",
+          "mode" : "tap",
+          "size" : 76,
+          "x" : 0.9,
+          "y" : 0.8
+        },
+        {
+          "action" : "rmb",
+          "id" : "00000000-0000-0000-0000-000000000002",
+          "label" : "ALT",
+          "mode" : "tap",
+          "size" : 76,
+          "x" : 0.79,
+          "y" : 0.8
+        },
+        {
+          "action" : "space",
+          "id" : "00000000-0000-0000-0000-000000000003",
+          "label" : "Jump",
+          "mode" : "hold",
+          "size" : 60,
+          "x" : 0.9,
+          "y" : 0.58
+        },
+        {
+          "action" : "key-E",
+          "id" : "00000000-0000-0000-0000-000000000004",
+          "label" : "Use",
+          "mode" : "tap",
+          "size" : 54,
+          "x" : 0.79,
+          "y" : 0.58
+        },
+        {
+          "action" : "ctrl",
+          "id" : "00000000-0000-0000-0000-000000000005",
+          "label" : "Duck",
+          "mode" : "hold",
+          "size" : 54,
+          "x" : 0.27,
+          "y" : 0.84
+        },
+        {
+          "action" : "shift",
+          "id" : "00000000-0000-0000-0000-000000000006",
+          "label" : "Run",
+          "mode" : "hold",
+          "size" : 54,
+          "x" : 0.27,
+          "y" : 0.66
+        },
+        {
+          "action" : "key-R",
+          "id" : "00000000-0000-0000-0000-000000000007",
+          "label" : "R",
+          "mode" : "tap",
+          "size" : 46,
+          "x" : 0.7,
+          "y" : 0.88
+        }
+      ],
+      "look" : true
+    }
+  },
+  {
+    "clientId" : "22222222-2222-3333-4444-555555555555",
+    "game" : {
+      "kind" : "steam",
+      "steamAppID" : 427520,
+      "title" : "Factorio"
+    },
+    "name" : "",
+    "notes" : "",
+    "pad" : {
+      "binds" : {
+
+      }
+    }
+  },
+  {
+    "clientId" : "33333333-2222-3333-4444-555555555555",
+    "game" : {
+      "kind" : "steam",
+      "steamAppID" : 427520,
+      "title" : "Factorio"
+    },
+    "name" : "Touch only",
+    "notes" : "",
+    "touch" : {
+      "controls" : [
+        {
+          "action" : "stick-wasd",
+          "id" : "00000000-0000-0000-0000-000000000000",
+          "label" : "",
+          "mode" : "tap",
+          "size" : 104,
+          "x" : 0.12,
+          "y" : 0.74
+        },
+        {
+          "action" : "key-E",
+          "id" : "00000000-0000-0000-0000-000000000001",
+          "label" : "E",
+          "mode" : "tap",
+          "size" : 46,
+          "x" : 0.93,
+          "y" : 0.78
+        },
+        {
+          "action" : "key-F",
+          "id" : "00000000-0000-0000-0000-000000000002",
+          "label" : "F",
+          "mode" : "tap",
+          "size" : 46,
+          "x" : 0.85,
+          "y" : 0.78
+        },
+        {
+          "action" : "tab",
+          "id" : "00000000-0000-0000-0000-000000000003",
+          "label" : "Tab",
+          "mode" : "tap",
+          "size" : 46,
+          "x" : 0.93,
+          "y" : 0.62
+        },
+        {
+          "action" : "esc",
+          "id" : "00000000-0000-0000-0000-000000000004",
+          "label" : "Esc",
+          "mode" : "tap",
+          "size" : 46,
+          "x" : 0.85,
+          "y" : 0.62
+        },
+        {
+          "action" : "space",
+          "id" : "00000000-0000-0000-0000-000000000005",
+          "label" : "Space",
+          "mode" : "hold",
+          "size" : 56,
+          "x" : 0.77,
+          "y" : 0.78
+        },
+        {
+          "action" : "shift",
+          "id" : "00000000-0000-0000-0000-000000000006",
+          "label" : "Shift",
+          "mode" : "latch",
+          "size" : 50,
+          "x" : 0.77,
+          "y" : 0.62
+        }
+      ],
+      "look" : false
+    }
+  }
+]

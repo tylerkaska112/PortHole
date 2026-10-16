@@ -1,0 +1,65 @@
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -210,6 +210,26 @@
+ static LDR_DDAG_NODE *node_ntdll, *node_kernel32;
+ 
+ static NTSTATUS load_dll( const WCHAR *load_path, const WCHAR *libname, DWORD flags, WINE_MODREF** pwm, BOOL system );
++/* Porthole 0045 helpers */
++static BOOL ldr_name_is( const LDR_DATA_TABLE_ENTRY *ldr, const WCHAR *name )
++{
++    UNICODE_STRING str;
++    RtlInitUnicodeString( &str, name );
++    return RtlEqualUnicodeString( &ldr->BaseDllName, &str, TRUE );
++}
++
++static LDR_DATA_TABLE_ENTRY *ldr_find_by_name( const WCHAR *name )
++{
++    LIST_ENTRY *mark = &NtCurrentTeb()->Peb->LdrData->InLoadOrderModuleList, *entry;
++
++    for (entry = mark->Flink; entry != mark; entry = entry->Flink)
++    {
++        LDR_DATA_TABLE_ENTRY *mod = CONTAINING_RECORD( entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks );
++        if (ldr_name_is( mod, name )) return mod;
++    }
++    return NULL;
++}
++
+ static NTSTATUS process_attach( LDR_DDAG_NODE *node, LPVOID lpReserved );
+ static FARPROC find_ordinal_export( HMODULE module, const IMAGE_EXPORT_DIRECTORY *exports,
+                                     DWORD exp_size, DWORD ordinal, LPCWSTR load_path,
+@@ -2207,9 +2227,33 @@
+     status = walk_node_dependencies( node, lpReserved, process_attach );
+ 
+     if (!wm->ldr.InInitializationOrderLinks.Flink)
+-        InsertTailList(&NtCurrentTeb()->Peb->LdrData->InInitializationOrderModuleList,
+-                &wm->ldr.InInitializationOrderLinks);
++    {
++        /* Porthole 0045: Windows lists ntdll first in the initialization order (ntdll, kernelbase, kernel32, ...) and programs
++         * rely on it: Black Ops 3 takes the first entry as ntdll and looks NtCreateSection up in it. Here ntdll is attached
++         * last (the emulator DLL it imports comes first), so it sat fifth and the program searched kernelbase instead and
++         * called a null pointer. */
++        if (ldr_name_is( &wm->ldr, L"ntdll.dll" ))
++            InsertHeadList(&NtCurrentTeb()->Peb->LdrData->InInitializationOrderModuleList,
++                    &wm->ldr.InInitializationOrderLinks);
++        else
++            InsertTailList(&NtCurrentTeb()->Peb->LdrData->InInitializationOrderModuleList,
++                    &wm->ldr.InInitializationOrderLinks);
++    }
+ 
++    /* Porthole 0045: Windows' load and memory order start exe, ntdll, kernel32, kernelbase; here the emulator DLL and ucrtbase
++     * came between. Put kernelbase, then kernel32, right after ntdll (kernel32 ends up first, as on Windows). */
++    if (ldr_name_is( &wm->ldr, L"kernelbase.dll" ) || ldr_name_is( &wm->ldr, L"kernel32.dll" ))
++    {
++        LDR_DATA_TABLE_ENTRY *nt = ldr_find_by_name( L"ntdll.dll" );
++        if (nt && nt != &wm->ldr)
++        {
++            RemoveEntryList( &wm->ldr.InLoadOrderLinks );
++            InsertHeadList( &nt->InLoadOrderLinks, &wm->ldr.InLoadOrderLinks );
++            RemoveEntryList( &wm->ldr.InMemoryOrderLinks );
++            InsertHeadList( &nt->InMemoryOrderLinks, &wm->ldr.InMemoryOrderLinks );
++        }
++    }
++
+     /* Call DLL entry point */
+     if (status == STATUS_SUCCESS)
+     {

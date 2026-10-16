@@ -1,0 +1,52 @@
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -3079,6 +3079,49 @@
+                                 ios_exc_dump_str( k == 1 ? "what() / first string" : "string at object+8*k", (ULONG_PTR)ob[k], 200, 0 );
+                     }
+                     else ERR( "[exc] 0130   object UNREADABLE at %p\n", (void *)obj );
++                    /* Porthole 0132: which locale name? The throwing code is the program's own statically linked C++ library, so no DLL sees the name. It is on the stack as an inline
++                     * (small-string) buffer or behind a pointer. List the printable runs in the 4 KB above the exception's stack pointer, and the short strings its pointers lead to. */
++                    {
++                        unsigned char stk[4096];
++                        ULONG_PTR sp = (ULONG_PTR)orig_context->Rsp;
++                        unsigned printed = 0, i, j;
++
++                        got = 0;
++                        if (!NtReadVirtualMemory( GetCurrentProcess(), (void *)sp, stk, sizeof(stk), &got ) && got >= 64)
++                        {
++                            for (i = 0; i + 4 <= got && printed < 40; )
++                            {
++                                for (j = i; j < got && stk[j] >= 32 && stk[j] < 127; j++) ;
++                                if (j - i >= 4)
++                                {
++                                    char run[64];
++                                    unsigned n = j - i > 60 ? 60 : j - i;
++                                    memcpy( run, stk + i, n ); run[n] = 0;
++                                    ERR( "[exc] 0132   stack+0x%x text \"%s\"\n", i, run );
++                                    printed++;
++                                    i = j;
++                                }
++                                else i++;
++                            }
++                            for (i = 0; i + 8 <= got && printed < 80; i += 8)
++                            {
++                                ULONG64 pv = *(ULONG64 *)(stk + i);
++                                char str[48];
++                                SIZE_T g2 = 0;
++
++                                if (pv < 0x10000 || pv >= 0x800000000000ULL) continue;
++                                memset( str, 0, sizeof(str) );
++                                if (NtReadVirtualMemory( GetCurrentProcess(), (void *)(ULONG_PTR)pv, str, sizeof(str) - 1, &g2 ) || g2 < 3) continue;
++                                for (j = 0; j < g2 && str[j] >= 32 && str[j] < 127; j++) ;
++                                if (j >= 3 && j < g2 && str[j] == 0)
++                                {
++                                    ERR( "[exc] 0132   stack+0x%x -> %p \"%s\"\n", i, (void *)(ULONG_PTR)pv, str );
++                                    printed++;
++                                }
++                            }
++                        }
++                        else ERR( "[exc] 0132   stack at %p UNREADABLE\n", (void *)sp );
++                    }
+                 }
+ 
+                 if (rec->ExceptionCode == 0x20474343 && rec->NumberParameters >= 1)

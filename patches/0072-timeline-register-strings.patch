@@ -1,0 +1,75 @@
+--- a/build/ntdll-unix/server_ios.c
++++ b/build/ntdll-unix/server_ios.c
+@@ -2042,9 +2042,11 @@
+ {
+     const char *docs = getenv( "MADEIRA_DOCS_DIR" );
+     char dir[900], path[1024];
+-    FILE *idx;
++    FILE *idx, *strs;
+     struct timespec t0, now;
+     uint64_t last_rsp = 0, last_rbp = 0;
++    unsigned nstr = 0;
++    char last_strs[600] = "";
+     unsigned nsnap = 0;
+     (void)arg;
+     if (!docs) return NULL;
+@@ -2052,6 +2054,8 @@
+     mkdir( dir, 0777 );
+     snprintf( path, sizeof(path), "%s/index.txt", dir );
+     if (!(idx = fopen( path, "w" ))) return NULL;
++    snprintf( path, sizeof(path), "%s/strings.txt", dir );
++    strs = fopen( path, "w" );
+     clock_gettime( CLOCK_MONOTONIC, &t0 );
+     for (;;)
+     {
+@@ -2060,7 +2064,7 @@
+         mach_msg_type_number_t tcount, k;
+         int best_cpu = 0;
+         long ms;
+-        usleep( 50000 );
++        usleep( 20000 );
+         clock_gettime( CLOCK_MONOTONIC, &now );
+         ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
+         if (ms > 150000 || nsnap >= 600) break;
+@@ -2078,7 +2082,32 @@
+             uint64_t g[16], rip = 0;
+             uint32_t cpsr;
+             const char *why = "";
+-            if (ios_live_snapshot( best, g, &rip, &cpsr, &why ) && g[4] > 0x10000 && (g[4] != last_rsp || g[5] != last_rbp))
++            int have = ios_live_snapshot( best, g, &rip, &cpsr, &why );
++            /* 0072: text the registers point at (the names a lookup is comparing); one line per change, up to 6000 lines */
++            if (have && strs && nstr < 6000)
++            {
++                static const char *rn[16] = { "rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15" };
++                char cur[600];
++                int cn = 0, q;
++                cur[0] = 0;
++                for (q = 0; q < 16; q++)
++                {
++                    unsigned char tb[40];
++                    int len = 0;
++                    if (q == 4 || g[q] < 0x100000 || g[q] >= 0x800000000000ull) continue;
++                    if (!ios_ts_read( g[q], tb, sizeof(tb) )) continue;
++                    while (len < (int)sizeof(tb) && tb[len] >= 0x20 && tb[len] < 0x7f) len++;
++                    if (len >= 5 && cn < (int)sizeof(cur) - 60) cn += snprintf( cur + cn, sizeof(cur) - cn, " %s=\"%.*s\"", rn[q], len, tb );
++                }
++                if (cn && strcmp( cur, last_strs ))
++                {
++                    fprintf( strs, "%ld rip=%#llx rsp=%#llx%s\n", ms, (unsigned long long)rip, (unsigned long long)g[4], cur );
++                    fflush( strs );
++                    strcpy( last_strs, cur );
++                    nstr++;
++                }
++            }
++            if (have && g[4] > 0x10000 && (g[4] != last_rsp || g[5] != last_rbp))
+             {
+                 static unsigned char buf[0x3400];
+                 static uint64_t min_rsp = ~0ull;
+@@ -2112,6 +2141,7 @@
+         vm_deallocate( mach_task_self(), (vm_address_t)tlist, tcount * sizeof(*tlist) );
+     }
+     fclose( idx );
++    if (strs) fclose( strs );
+     return NULL;
+ }
+ 

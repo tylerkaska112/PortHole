@@ -1,0 +1,90 @@
+diff --git a/FEX/Source/Windows/ARM64EC/Module.cpp b/FEX/Source/Windows/ARM64EC/Module.cpp
+index fbaf76f..f42e1e7 100644
+--- a/FEX/Source/Windows/ARM64EC/Module.cpp
++++ b/FEX/Source/Windows/ARM64EC/Module.cpp
+@@ -1110,6 +1110,22 @@ NTSTATUS ProcessInit() {
+   return STATUS_SUCCESS;
+ }
+ 
++/* iOS-Madeira ml1110: the context can be gone while memory notifications still arrive.
++ *
++ * Factorio started by Steam's client (a child process) called ExitProcess, and Wine's exit then unmaps the
++ * process's memory. Every unmap reports to the invalidation tracker, which calls into the FEXCore context.
++ * By then the context object had been destroyed and its memory zeroed, so the tracker's virtual call through
++ * the context's (now null) vtable read address 0xf0 and faulted (libarm64ecfex.dll+0x12b9e8,
++ * InvalidationTracker::InvalidateIntervalInternal). Nothing handled it, the process never finished exiting,
++ * and Valve's client never saw the game end.
++ *
++ * Nothing needs invalidating once the context is gone: there is no translated code left to protect. Check the
++ * global pointer (null after the unique_ptr was destroyed) and the object's first word (the vtable, zero once
++ * the memory was recycled) before handing anything to the tracker. */
++static bool ContextIsAlive() {
++  return CTX && *reinterpret_cast<void* const*>(CTX.get()) != nullptr;
++}
++
+ void ProcessTerm(HANDLE Handle, BOOL After, NTSTATUS Status) {}
+ 
+ class ScopedCallbackDisable {
+@@ -1418,7 +1434,7 @@ NTSTATUS ResetToConsistentState(EXCEPTION_RECORD* Exception, CONTEXT* GuestConte
+  * required for its correctness. Drop the BEFORE/AFTER mutex entirely
+  * and just call into the tracker directly on AFTER. */
+ void NotifyMemoryAlloc(void* Address, SIZE_T Size, ULONG Type, ULONG Prot, BOOL After, NTSTATUS Status) {
+-  if (!InvalidationTracker || !GetCPUArea().ThreadState()) {
++  if (!InvalidationTracker || !ContextIsAlive() || !GetCPUArea().ThreadState()) {
+     return;
+   }
+ 
+@@ -1431,7 +1447,7 @@ void NotifyMemoryAlloc(void* Address, SIZE_T Size, ULONG Type, ULONG Prot, BOOL
+ }
+ 
+ void NotifyMemoryFree(void* Address, SIZE_T Size, ULONG FreeType, BOOL After, NTSTATUS Status) {
+-  if (!InvalidationTracker || !GetCPUArea().ThreadState()) {
++  if (!InvalidationTracker || !ContextIsAlive() || !GetCPUArea().ThreadState()) {
+     return;
+   }
+ 
+@@ -1443,7 +1459,7 @@ void NotifyMemoryFree(void* Address, SIZE_T Size, ULONG FreeType, BOOL After, NT
+ }
+ 
+ void NotifyMemoryProtect(void* Address, SIZE_T Size, ULONG NewProt, BOOL After, NTSTATUS Status) {
+-  if (!InvalidationTracker || !GetCPUArea().ThreadState()) {
++  if (!InvalidationTracker || !ContextIsAlive() || !GetCPUArea().ThreadState()) {
+     return;
+   }
+ 
+@@ -1536,7 +1552,7 @@ NTSTATUS NotifyMapViewOfSection(void* Unk1, void* Address, void* Unk2, SIZE_T Si
+ }
+ 
+ void NotifyUnmapViewOfSection(void* Address, BOOL After, NTSTATUS Status) {
+-  if (!InvalidationTracker || !GetCPUArea().ThreadState()) {
++  if (!InvalidationTracker || !ContextIsAlive() || !GetCPUArea().ThreadState()) {
+     return;
+   }
+ 
+@@ -1552,7 +1568,7 @@ void NotifyUnmapViewOfSection(void* Address, BOOL After, NTSTATUS Status) {
+ }
+ 
+ void FlushInstructionCacheHeavy(const void* Address, SIZE_T Size) {
+-  if (!InvalidationTracker || !GetCPUArea().ThreadState()) {
++  if (!InvalidationTracker || !ContextIsAlive() || !GetCPUArea().ThreadState()) {
+     return;
+   }
+ 
+@@ -1561,7 +1577,7 @@ void FlushInstructionCacheHeavy(const void* Address, SIZE_T Size) {
+ }
+ 
+ void BTCpu64FlushInstructionCache(const void* Address, SIZE_T Size) {
+-  if (!InvalidationTracker || !GetCPUArea().ThreadState()) {
++  if (!InvalidationTracker || !ContextIsAlive() || !GetCPUArea().ThreadState()) {
+     return;
+   }
+ 
+@@ -1570,7 +1586,7 @@ void BTCpu64FlushInstructionCache(const void* Address, SIZE_T Size) {
+ }
+ 
+ void BTCpu64NotifyMemoryDirty(void* Address, SIZE_T Size) {
+-  if (!InvalidationTracker || !GetCPUArea().ThreadState()) {
++  if (!InvalidationTracker || !ContextIsAlive() || !GetCPUArea().ThreadState()) {
+     return;
+   }
+ 

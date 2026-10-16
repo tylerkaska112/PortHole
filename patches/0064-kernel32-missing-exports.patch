@@ -1,0 +1,802 @@
+--- /dev/null
++++ b/dlls/kernel32/ios_missing_exports.c
+@@ -0,0 +1,352 @@
++/*
++ * Porthole 0064: kernel32 exports Windows 10 has and this one lacks.
++ *
++ * Black Ops 3's copy protection looks a kernel32 function up by a hash of its name, walking kernel32's export table, and loops forever when
++ * the name is not exported (the walk found nothing in all 1358 names, `RDI` = NumberOfNames, `RBX`/`R14` = the name and ordinal tables of
++ * kernel32). Every name Windows 10 (1909) exports that ours does not is exported here as a function that reports "not implemented" and
++ * returns 0, and logs its first calls (`[k32-stub] 0064`), which names the one the game is after.
++ */
++#include <stdarg.h>
++#include "windef.h"
++#include "winbase.h"
++#include "winerror.h"
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(kernel32);
++
++static void ios_k32_stub( const char *name )
++{
++    static LONG calls;
++    LONG n = InterlockedIncrement( &calls );
++    if (n <= 60) ERR( "[k32-stub] 0064 %s called (call %ld)\n", name, n );
++    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
++}
++
++#define IOS_K32_STUB(name) DWORD_PTR WINAPI ios_k32_stub_##name(void) { ios_k32_stub( #name ); return 0; }
++
++IOS_K32_STUB(ActivateActCtxWorker)
++IOS_K32_STUB(AddIntegrityLabelToBoundaryDescriptor)
++IOS_K32_STUB(AddLocalAlternateComputerNameA)
++IOS_K32_STUB(AddLocalAlternateComputerNameW)
++IOS_K32_STUB(AddRefActCtxWorker)
++IOS_K32_STUB(AddResourceAttributeAce)
++IOS_K32_STUB(AddSIDToBoundaryDescriptor)
++IOS_K32_STUB(AddScopedPolicyIDAce)
++IOS_K32_STUB(AddSecureMemoryCacheCallback)
++IOS_K32_STUB(AdjustCalendarDate)
++IOS_K32_STUB(AppPolicyGetClrCompat)
++IOS_K32_STUB(AppPolicyGetCreateFileAccess)
++IOS_K32_STUB(AppPolicyGetLifecycleManagement)
++IOS_K32_STUB(AppPolicyGetProcessTerminationMethod)
++IOS_K32_STUB(AppPolicyGetShowDeveloperDiagnostic)
++IOS_K32_STUB(AppPolicyGetThreadInitializationType)
++IOS_K32_STUB(AppXGetOSMaxVersionTested)
++IOS_K32_STUB(BaseCheckAppcompatCacheEx)
++IOS_K32_STUB(BaseCheckAppcompatCacheExWorker)
++IOS_K32_STUB(BaseCheckAppcompatCacheWorker)
++IOS_K32_STUB(BaseCheckElevation)
++IOS_K32_STUB(BaseCleanupAppcompatCacheSupportWorker)
++IOS_K32_STUB(BaseDestroyVDMEnvironment)
++IOS_K32_STUB(BaseDllReadWriteIniFile)
++IOS_K32_STUB(BaseDumpAppcompatCacheWorker)
++IOS_K32_STUB(BaseElevationPostProcessing)
++IOS_K32_STUB(BaseFlushAppcompatCacheWorker)
++IOS_K32_STUB(BaseFormatObjectAttributes)
++IOS_K32_STUB(BaseFormatTimeOut)
++IOS_K32_STUB(BaseFreeAppCompatDataForProcessWorker)
++IOS_K32_STUB(BaseGenerateAppCompatData)
++IOS_K32_STUB(BaseInitAppcompatCacheSupportWorker)
++IOS_K32_STUB(BaseIsAppcompatInfrastructureDisabled)
++IOS_K32_STUB(BaseIsAppcompatInfrastructureDisabledWorker)
++IOS_K32_STUB(BaseIsDosApplication)
++IOS_K32_STUB(BaseQueryModuleData)
++IOS_K32_STUB(BaseReadAppCompatDataForProcessWorker)
++IOS_K32_STUB(BaseSetLastNTError)
++IOS_K32_STUB(BaseUpdateAppcompatCacheWorker)
++IOS_K32_STUB(BaseUpdateVDMEntry)
++IOS_K32_STUB(BaseVerifyUnicodeString)
++IOS_K32_STUB(BaseWriteErrorElevationRequiredEvent)
++IOS_K32_STUB(Basep8BitStringToDynamicUnicodeString)
++IOS_K32_STUB(BasepAllocateActivationContextActivationBlock)
++IOS_K32_STUB(BasepAnsiStringToDynamicUnicodeString)
++IOS_K32_STUB(BasepAppContainerEnvironmentExtension)
++IOS_K32_STUB(BasepAppXExtension)
++IOS_K32_STUB(BasepCheckAppCompat)
++IOS_K32_STUB(BasepCheckWebBladeHashes)
++IOS_K32_STUB(BasepCheckWinSaferRestrictions)
++IOS_K32_STUB(BasepConstructSxsCreateProcessMessage)
++IOS_K32_STUB(BasepCopyEncryption)
++IOS_K32_STUB(BasepFreeActivationContextActivationBlock)
++IOS_K32_STUB(BasepFreeAppCompatData)
++IOS_K32_STUB(BasepGetAppCompatData)
++IOS_K32_STUB(BasepGetComputerNameFromNtPath)
++IOS_K32_STUB(BasepGetExeArchType)
++IOS_K32_STUB(BasepInitAppCompatData)
++IOS_K32_STUB(BasepIsProcessAllowed)
++IOS_K32_STUB(BasepMapModuleHandle)
++IOS_K32_STUB(BasepNotifyLoadStringResource)
++IOS_K32_STUB(BasepPostSuccessAppXExtension)
++IOS_K32_STUB(BasepProcessInvalidImage)
++IOS_K32_STUB(BasepQueryAppCompat)
++IOS_K32_STUB(BasepQueryModuleChpeSettings)
++IOS_K32_STUB(BasepReleaseAppXContext)
++IOS_K32_STUB(BasepReleaseSxsCreateProcessUtilityStruct)
++IOS_K32_STUB(BasepReportFault)
++IOS_K32_STUB(BasepSetFileEncryptionCompression)
++IOS_K32_STUB(CeipIsOptedIn)
++IOS_K32_STUB(CheckAllowDecryptedRemoteDestinationPolicy)
++IOS_K32_STUB(CheckElevation)
++IOS_K32_STUB(CheckElevationEnabled)
++IOS_K32_STUB(CheckForReadOnlyResource)
++IOS_K32_STUB(CheckForReadOnlyResourceFilter)
++IOS_K32_STUB(CheckTokenCapability)
++IOS_K32_STUB(CheckTokenMembershipEx)
++IOS_K32_STUB(ClosePackageInfo)
++IOS_K32_STUB(ClosePrivateNamespace)
++IOS_K32_STUB(CloseState)
++IOS_K32_STUB(CompareCalendarDates)
++IOS_K32_STUB(ConvertCalDateTimeToSystemTime)
++IOS_K32_STUB(ConvertNLSDayOfWeekToWin32DayOfWeek)
++IOS_K32_STUB(ConvertSystemTimeToCalDateTime)
++IOS_K32_STUB(CopyFileTransactedA)
++IOS_K32_STUB(CopyFileTransactedW)
++IOS_K32_STUB(CreateActCtxWWorker)
++IOS_K32_STUB(CreateEnclave)
++IOS_K32_STUB(CreateFileMappingNumaA)
++IOS_K32_STUB(CreateJobSet)
++IOS_K32_STUB(CreatePrivateNamespaceA)
++IOS_K32_STUB(CreatePrivateNamespaceW)
++IOS_K32_STUB(CreateSymbolicLinkTransactedA)
++IOS_K32_STUB(CreateSymbolicLinkTransactedW)
++IOS_K32_STUB(DeactivateActCtxWorker)
++IOS_K32_STUB(DeleteBoundaryDescriptor)
++IOS_K32_STUB(DisableThreadProfiling)
++IOS_K32_STUB(DnsHostnameToComputerNameExW)
++IOS_K32_STUB(DosPathToSessionPathA)
++IOS_K32_STUB(DosPathToSessionPathW)
++IOS_K32_STUB(DuplicateEncryptionInfoFileExt)
++IOS_K32_STUB(EnableThreadProfiling)
++IOS_K32_STUB(EnumSystemGeoNames)
++IOS_K32_STUB(EnumerateLocalComputerNamesA)
++IOS_K32_STUB(EnumerateLocalComputerNamesW)
++IOS_K32_STUB(FindActCtxSectionGuidWorker)
++IOS_K32_STUB(FindActCtxSectionStringWWorker)
++IOS_K32_STUB(FindFirstFileNameTransactedW)
++IOS_K32_STUB(FindFirstStreamTransactedW)
++IOS_K32_STUB(FindNextFileNameW)
++IOS_K32_STUB(FindPackagesByPackageFamily)
++IOS_K32_STUB(FormatApplicationUserModelId)
++IOS_K32_STUB(FreeMemoryJobObject)
++IOS_K32_STUB(GetAppContainerAce)
++IOS_K32_STUB(GetAppContainerNamedObjectPath)
++IOS_K32_STUB(GetApplicationRecoveryCallback)
++IOS_K32_STUB(GetApplicationRecoveryCallbackWorker)
++IOS_K32_STUB(GetApplicationRestartSettingsWorker)
++IOS_K32_STUB(GetApplicationUserModelId)
++IOS_K32_STUB(GetCachedSigningLevel)
++IOS_K32_STUB(GetCalendarDateFormat)
++IOS_K32_STUB(GetCalendarDateFormatEx)
++IOS_K32_STUB(GetCalendarDaysInMonth)
++IOS_K32_STUB(GetCalendarDifferenceInDays)
++IOS_K32_STUB(GetCalendarMonthsInYear)
++IOS_K32_STUB(GetCalendarSupportedDateRange)
++IOS_K32_STUB(GetCalendarWeekNumber)
++IOS_K32_STUB(GetComPlusPackageInstallStatus)
++IOS_K32_STUB(GetCompressedFileSizeTransactedA)
++IOS_K32_STUB(GetCompressedFileSizeTransactedW)
++IOS_K32_STUB(GetConsoleHistoryInfo)
++IOS_K32_STUB(GetConsoleSelectionInfo)
++IOS_K32_STUB(GetCurrentActCtxWorker)
++IOS_K32_STUB(GetDateFormatAWorker)
++IOS_K32_STUB(GetDateFormatWWorker)
++IOS_K32_STUB(GetDurationFormat)
++IOS_K32_STUB(GetDurationFormatEx)
++IOS_K32_STUB(GetEncryptedFileVersionExt)
++IOS_K32_STUB(GetEraNameCountedString)
++IOS_K32_STUB(GetFileBandwidthReservation)
++IOS_K32_STUB(GetFirmwareEnvironmentVariableExA)
++IOS_K32_STUB(GetFirmwareEnvironmentVariableExW)
++IOS_K32_STUB(GetFullPathNameTransactedA)
++IOS_K32_STUB(GetFullPathNameTransactedW)
++IOS_K32_STUB(GetLongPathNameTransactedA)
++IOS_K32_STUB(GetLongPathNameTransactedW)
++IOS_K32_STUB(GetMemoryErrorHandlingCapabilities)
++IOS_K32_STUB(GetNamedPipeAttribute)
++IOS_K32_STUB(GetNamedPipeClientComputerNameA)
++IOS_K32_STUB(GetNamedPipeClientComputerNameW)
++IOS_K32_STUB(GetNumaNodeNumberFromHandle)
++IOS_K32_STUB(GetPackageApplicationIds)
++IOS_K32_STUB(GetPackageId)
++IOS_K32_STUB(GetPackageInfo)
++IOS_K32_STUB(GetPackagePath)
++IOS_K32_STUB(GetProcessDefaultCpuSets)
++IOS_K32_STUB(GetProcessorSystemCycleTime)
++IOS_K32_STUB(GetStagedPackagePathByFullName)
++IOS_K32_STUB(GetStateFolder)
++IOS_K32_STUB(GetStringScripts)
++IOS_K32_STUB(GetSystemAppDataKey)
++IOS_K32_STUB(GetThreadInformation)
++IOS_K32_STUB(GetThreadSelectedCpuSets)
++IOS_K32_STUB(GetTimeFormatAWorker)
++IOS_K32_STUB(GetTimeFormatWWorker)
++IOS_K32_STUB(GetUILanguageInfo)
++IOS_K32_STUB(GetUmsSystemThreadInformation)
++IOS_K32_STUB(GlobalAddAtomExA)
++IOS_K32_STUB(GlobalAddAtomExW)
++IOS_K32_STUB(InitializeEnclave)
++IOS_K32_STUB(InstallELAMCertificateInfo)
++IOS_K32_STUB(IsCalendarLeapDay)
++IOS_K32_STUB(IsCalendarLeapMonth)
++IOS_K32_STUB(IsCalendarLeapYear)
++IOS_K32_STUB(IsEnclaveTypeSupported)
++IOS_K32_STUB(IsNativeVhdBoot)
++IOS_K32_STUB(IsProcessCritical)
++IOS_K32_STUB(IsValidCalDateTime)
++IOS_K32_STUB(IsWow64GuestMachineSupported)
++IOS_K32_STUB(LZCloseFile)
++IOS_K32_STUB(LZCreateFileW)
++IOS_K32_STUB(LoadEnclaveData)
++IOS_K32_STUB(LoadStringBaseExW)
++IOS_K32_STUB(LoadStringBaseW)
++IOS_K32_STUB(LocalFileTimeToLocalSystemTime)
++IOS_K32_STUB(LocalSystemTimeToLocalFileTime)
++IOS_K32_STUB(MapUserPhysicalPagesScatter)
++IOS_K32_STUB(NlsCheckPolicy)
++IOS_K32_STUB(NlsEventDataDescCreate)
++IOS_K32_STUB(NlsGetCacheUpdateCount)
++IOS_K32_STUB(NlsUpdateLocale)
++IOS_K32_STUB(NlsUpdateSystemLocale)
++IOS_K32_STUB(NlsWriteEtwEvent)
++IOS_K32_STUB(NotifyMountMgr)
++IOS_K32_STUB(NotifyUILanguageChange)
++IOS_K32_STUB(NtVdm64CreateProcessInternalW)
++IOS_K32_STUB(OOBEComplete)
++IOS_K32_STUB(OfferVirtualMemory)
++IOS_K32_STUB(OpenConsoleWStub)
++IOS_K32_STUB(OpenPackageInfoByFullName)
++IOS_K32_STUB(OpenPrivateNamespaceA)
++IOS_K32_STUB(OpenPrivateNamespaceW)
++IOS_K32_STUB(OpenState)
++IOS_K32_STUB(OpenStateExplicit)
++IOS_K32_STUB(PackageFamilyNameFromFullName)
++IOS_K32_STUB(PackageFamilyNameFromId)
++IOS_K32_STUB(PackageFullNameFromId)
++IOS_K32_STUB(PackageNameAndPublisherIdFromFamilyName)
++IOS_K32_STUB(ParseApplicationUserModelId)
++IOS_K32_STUB(PssCaptureSnapshot)
++IOS_K32_STUB(PssDuplicateSnapshot)
++IOS_K32_STUB(PssFreeSnapshot)
++IOS_K32_STUB(PssQuerySnapshot)
++IOS_K32_STUB(PssWalkMarkerCreate)
++IOS_K32_STUB(PssWalkMarkerFree)
++IOS_K32_STUB(PssWalkMarkerGetPosition)
++IOS_K32_STUB(PssWalkMarkerRewind)
++IOS_K32_STUB(PssWalkMarkerSeek)
++IOS_K32_STUB(PssWalkMarkerSeekToBeginning)
++IOS_K32_STUB(PssWalkMarkerSetPosition)
++IOS_K32_STUB(PssWalkMarkerTell)
++IOS_K32_STUB(PssWalkSnapshot)
++IOS_K32_STUB(QueryActCtxSettingsWWorker)
++IOS_K32_STUB(QueryActCtxWWorker)
++IOS_K32_STUB(QueryIoRateControlInformationJobObject)
++IOS_K32_STUB(QueryProcessAffinityUpdateMode)
++IOS_K32_STUB(QueryProtectedPolicy)
++IOS_K32_STUB(QueryThreadProfiling)
++IOS_K32_STUB(QuirkGetData2Worker)
++IOS_K32_STUB(QuirkGetDataWorker)
++IOS_K32_STUB(QuirkIsEnabled2Worker)
++IOS_K32_STUB(QuirkIsEnabled3Worker)
++IOS_K32_STUB(QuirkIsEnabledForPackage2Worker)
++IOS_K32_STUB(QuirkIsEnabledForPackage3Worker)
++IOS_K32_STUB(QuirkIsEnabledForPackage4Worker)
++IOS_K32_STUB(QuirkIsEnabledForPackageWorker)
++IOS_K32_STUB(QuirkIsEnabledForProcessWorker)
++IOS_K32_STUB(QuirkIsEnabledWorker)
++IOS_K32_STUB(RaiseInvalid16BitExeError)
++IOS_K32_STUB(ReadDirectoryChangesExW)
++IOS_K32_STUB(ReadThreadProfilingData)
++IOS_K32_STUB(ReclaimVirtualMemory)
++IOS_K32_STUB(RegCopyTreeW)
++IOS_K32_STUB(RegDisablePredefinedCacheEx)
++IOS_K32_STUB(RegisterBadMemoryNotification)
++IOS_K32_STUB(RegisterWaitUntilOOBECompleted)
++IOS_K32_STUB(ReleaseActCtxWorker)
++IOS_K32_STUB(RemoveLocalAlternateComputerNameA)
++IOS_K32_STUB(RemoveLocalAlternateComputerNameW)
++IOS_K32_STUB(RemoveSecureMemoryCacheCallback)
++IOS_K32_STUB(ReplacePartitionUnit)
++IOS_K32_STUB(ResolveDelayLoadsFromDll)
++IOS_K32_STUB(SetComPlusPackageInstallStatus)
++IOS_K32_STUB(SetComputerNameEx2W)
++IOS_K32_STUB(SetConsoleHistoryInfo)
++IOS_K32_STUB(SetDynamicTimeZoneInformation)
++IOS_K32_STUB(SetFileAttributesTransactedA)
++IOS_K32_STUB(SetFileAttributesTransactedW)
++IOS_K32_STUB(SetFileBandwidthReservation)
++IOS_K32_STUB(SetFileIoOverlappedRange)
++IOS_K32_STUB(SetFileShortNameA)
++IOS_K32_STUB(SetFileShortNameW)
++IOS_K32_STUB(SetFirmwareEnvironmentVariableExA)
++IOS_K32_STUB(SetFirmwareEnvironmentVariableExW)
++IOS_K32_STUB(SetIoRateControlInformationJobObject)
++IOS_K32_STUB(SetLocalPrimaryComputerNameA)
++IOS_K32_STUB(SetLocalPrimaryComputerNameW)
++IOS_K32_STUB(SetNamedPipeAttribute)
++IOS_K32_STUB(SetProtectedPolicy)
++IOS_K32_STUB(SetThreadpoolTimerEx)
++IOS_K32_STUB(SetThreadpoolWaitEx)
++IOS_K32_STUB(SetVolumeMountPointWStub)
++IOS_K32_STUB(SortCloseHandle)
++IOS_K32_STUB(SortGetHandle)
++IOS_K32_STUB(SystemTimeToTzSpecificLocalTimeEx)
++IOS_K32_STUB(TermsrvConvertSysRootToUserDir)
++IOS_K32_STUB(TermsrvCreateRegEntry)
++IOS_K32_STUB(TermsrvDeleteKey)
++IOS_K32_STUB(TermsrvDeleteValue)
++IOS_K32_STUB(TermsrvGetPreSetValue)
++IOS_K32_STUB(TermsrvGetWindowsDirectoryA)
++IOS_K32_STUB(TermsrvGetWindowsDirectoryW)
++IOS_K32_STUB(TermsrvOpenRegEntry)
++IOS_K32_STUB(TermsrvOpenUserClasses)
++IOS_K32_STUB(TermsrvRestoreKey)
++IOS_K32_STUB(TermsrvSetKeySecurity)
++IOS_K32_STUB(TermsrvSetValueKey)
++IOS_K32_STUB(TermsrvSyncUserIniFileExt)
++IOS_K32_STUB(TzSpecificLocalTimeToSystemTimeEx)
++IOS_K32_STUB(UTRegister)
++IOS_K32_STUB(UTUnRegister)
++IOS_K32_STUB(UnregisterApplicationRecoveryCallback)
++IOS_K32_STUB(UnregisterBadMemoryNotification)
++IOS_K32_STUB(UnregisterConsoleIME)
++IOS_K32_STUB(UnregisterWaitUntilOOBECompleted)
++IOS_K32_STUB(UpdateCalendarDayOfWeek)
++IOS_K32_STUB(VerifyScripts)
++IOS_K32_STUB(WerGetFlagsWorker)
++IOS_K32_STUB(WerRegisterAdditionalProcess)
++IOS_K32_STUB(WerRegisterAppLocalDump)
++IOS_K32_STUB(WerRegisterExcludedMemoryBlock)
++IOS_K32_STUB(WerRegisterFileWorker)
++IOS_K32_STUB(WerRegisterMemoryBlockWorker)
++IOS_K32_STUB(WerRegisterRuntimeExceptionModuleWorker)
++IOS_K32_STUB(WerSetFlagsWorker)
++IOS_K32_STUB(WerUnregisterAdditionalProcess)
++IOS_K32_STUB(WerUnregisterAppLocalDump)
++IOS_K32_STUB(WerUnregisterExcludedMemoryBlock)
++IOS_K32_STUB(WerUnregisterFileWorker)
++IOS_K32_STUB(WerUnregisterMemoryBlockWorker)
++IOS_K32_STUB(WerUnregisterRuntimeExceptionModuleWorker)
++IOS_K32_STUB(WerpGetDebugger)
++IOS_K32_STUB(WerpInitiateRemoteRecovery)
++IOS_K32_STUB(WerpLaunchAeDebug)
++IOS_K32_STUB(WerpNotifyLoadStringResourceWorker)
++IOS_K32_STUB(WerpNotifyUseStringResourceWorker)
++IOS_K32_STUB(Wow64SuspendThread)
++IOS_K32_STUB(ZombifyActCtxWorker)
++IOS_K32_STUB(uaw_lstrcmpW)
++IOS_K32_STUB(uaw_lstrcmpiW)
++IOS_K32_STUB(uaw_lstrlenW)
++IOS_K32_STUB(uaw_wcschr)
++IOS_K32_STUB(uaw_wcscpy)
++IOS_K32_STUB(uaw_wcsicmp)
++IOS_K32_STUB(uaw_wcslen)
++IOS_K32_STUB(uaw_wcsrchr)
+--- a/dlls/kernel32/kernel32.spec
++++ b/dlls/kernel32/kernel32.spec
+@@ -157,8 +157,8 @@
+ @ stdcall -import AllocateUserPhysicalPagesNuma(long ptr ptr long)
+ @ stdcall ApplicationRecoveryFinished(long)
+ @ stdcall ApplicationRecoveryInProgress(ptr)
+-@ stdcall AppPolicyGetMediaFoundationCodecLoading(ptr ptr) kernelbase.AppPolicyGetMediaFoundationCodecLoading
+-@ stdcall AppPolicyGetWindowingModel(ptr ptr) kernelbase.AppPolicyGetWindowingModel
++@ stdcall AppPolicyGetMediaFoundationCodecLoading(ptr ptr) KERNELBASE.AppPolicyGetMediaFoundationCodecLoading
++@ stdcall AppPolicyGetWindowingModel(ptr ptr) KERNELBASE.AppPolicyGetWindowingModel
+ @ stdcall -import AreFileApisANSI()
+ @ stdcall AssignProcessToJobObject(ptr ptr)
+ @ stdcall -import AttachConsole(long)
+@@ -288,7 +288,7 @@
+ @ stdcall CreateFileTransactedA(str long long ptr long long long ptr ptr ptr)
+ @ stdcall CreateFileMappingA(long ptr long long long str)
+ # @ stub CreateFileMappingNumaA
+-@ stdcall CreateFileMappingFromApp(long ptr long int64 wstr) kernelbase.CreateFileMappingFromApp
++@ stdcall CreateFileMappingFromApp(long ptr long int64 wstr) KERNELBASE.CreateFileMappingFromApp
+ @ stdcall -import CreateFileMappingNumaW(long ptr long long long wstr long)
+ @ stdcall -import CreateFileMappingW(long ptr long long long wstr)
+ @ stdcall -import CreateFileW(wstr long long ptr long long long)
+@@ -352,7 +352,7 @@
+ @ stdcall CreateWaitableTimerExA(ptr str long long)
+ @ stdcall -import CreateWaitableTimerExW(ptr wstr long long)
+ @ stdcall -import CreateWaitableTimerW(ptr long wstr)
+-@ stdcall CtrlRoutine(ptr) kernelbase.CtrlRoutine
++@ stdcall CtrlRoutine(ptr) KERNELBASE.CtrlRoutine
+ @ stdcall -import DeactivateActCtx(long long)
+ @ stdcall -import DebugActiveProcess(long)
+ @ stdcall -import DebugActiveProcessStop(long)
+@@ -375,7 +375,7 @@
+ @ stdcall -import DeleteProcThreadAttributeList(ptr)
+ # @ stub DisableThreadProfiling
+ @ stdcall DisassociateCurrentThreadFromCallback(ptr) NTDLL.TpDisassociateCallback
+-@ stdcall DiscardVirtualMemory(ptr long) kernelbase.DiscardVirtualMemory
++@ stdcall DiscardVirtualMemory(ptr long) KERNELBASE.DiscardVirtualMemory
+ @ stdcall DeleteSynchronizationBarrier(ptr)
+ @ stdcall DeleteTimerQueue(long)
+ @ stdcall -import DeleteTimerQueueEx(long long)
+@@ -636,12 +636,12 @@
+ @ stdcall -import GetCurrentConsoleFontEx(long long ptr)
+ @ stdcall -import GetCurrentDirectoryA(long ptr)
+ @ stdcall -import GetCurrentDirectoryW(long ptr)
+-@ stdcall GetCurrentApplicationUserModelId(ptr ptr) kernelbase.GetCurrentApplicationUserModelId
+-@ stdcall GetCurrentPackageFamilyName(ptr ptr) kernelbase.GetCurrentPackageFamilyName
+-@ stdcall GetCurrentPackageFullName(ptr ptr) kernelbase.GetCurrentPackageFullName
+-@ stdcall GetCurrentPackageId(ptr ptr) kernelbase.GetCurrentPackageId
+-@ stdcall GetCurrentPackageInfo(long ptr ptr ptr) kernelbase.GetCurrentPackageInfo
+-@ stdcall GetCurrentPackagePath(ptr ptr) kernelbase.GetCurrentPackagePath
++@ stdcall GetCurrentApplicationUserModelId(ptr ptr) KERNELBASE.GetCurrentApplicationUserModelId
++@ stdcall GetCurrentPackageFamilyName(ptr ptr) KERNELBASE.GetCurrentPackageFamilyName
++@ stdcall GetCurrentPackageFullName(ptr ptr) KERNELBASE.GetCurrentPackageFullName
++@ stdcall GetCurrentPackageId(ptr ptr) KERNELBASE.GetCurrentPackageId
++@ stdcall GetCurrentPackageInfo(long ptr ptr ptr) KERNELBASE.GetCurrentPackageInfo
++@ stdcall GetCurrentPackagePath(ptr ptr) KERNELBASE.GetCurrentPackagePath
+ @ stdcall -norelay GetCurrentProcess() KERNEL32_GetCurrentProcess
+ @ stdcall -norelay GetCurrentProcessId() KERNEL32_GetCurrentProcessId
+ @ stdcall GetCurrentProcessorNumber() NTDLL.NtGetCurrentProcessorNumber
+@@ -780,10 +780,10 @@
+ @ stdcall -import GetOverlappedResultEx(long ptr ptr long long)
+ @ stdcall -import GetUserDefaultGeoName(ptr long)
+ @ stdcall -import GetUserPreferredUILanguages(long ptr ptr ptr)
+-@ stdcall GetPackageFamilyName(long ptr ptr) kernelbase.GetPackageFamilyName
+-@ stdcall GetPackageFullName(long ptr ptr) kernelbase.GetPackageFullName
+-@ stdcall GetPackagesByPackageFamily(wstr ptr ptr ptr ptr) kernelbase.GetPackagesByPackageFamily
+-@ stdcall GetPackagePathByFullName(wstr ptr wstr) kernelbase.GetPackagePathByFullName
++@ stdcall GetPackageFamilyName(long ptr ptr) KERNELBASE.GetPackageFamilyName
++@ stdcall GetPackageFullName(long ptr ptr) KERNELBASE.GetPackageFullName
++@ stdcall GetPackagesByPackageFamily(wstr ptr ptr ptr ptr) KERNELBASE.GetPackagesByPackageFamily
++@ stdcall GetPackagePathByFullName(wstr ptr wstr) KERNELBASE.GetPackagePathByFullName
+ @ stdcall -import GetPhysicallyInstalledSystemMemory(ptr)
+ @ stdcall -import GetPriorityClass(long)
+ @ stdcall GetPrivateProfileIntA(str str long str)
+@@ -968,9 +968,9 @@
+ @ stdcall -import IdnToNameprepUnicode(long wstr long ptr long)
+ @ stdcall -import IdnToUnicode(long wstr long ptr long)
+ @ stdcall InitAtomTable(long)
+-@ stdcall InitOnceBeginInitialize(ptr long ptr ptr) kernelbase.InitOnceBeginInitialize
+-@ stdcall InitOnceComplete(ptr long ptr) kernelbase.InitOnceComplete
+-@ stdcall InitOnceExecuteOnce(ptr ptr ptr ptr) kernelbase.InitOnceExecuteOnce
++@ stdcall InitOnceBeginInitialize(ptr long ptr ptr) KERNELBASE.InitOnceBeginInitialize
++@ stdcall InitOnceComplete(ptr long ptr) KERNELBASE.InitOnceComplete
++@ stdcall InitOnceExecuteOnce(ptr ptr ptr ptr) KERNELBASE.InitOnceExecuteOnce
+ @ stdcall InitOnceInitialize(ptr) NTDLL.RtlRunOnceInitialize
+ @ stdcall InitializeConditionVariable(ptr) NTDLL.RtlInitializeConditionVariable
+ @ stdcall -import InitializeContext(ptr long ptr ptr)
+@@ -1114,7 +1114,7 @@
+ @ stdcall -import MapViewOfFile(long long long long long)
+ @ stdcall -import MapViewOfFileEx(long long long long long ptr)
+ @ stdcall -import MapViewOfFileExNuma(long long long long long ptr long)
+-@ stdcall MapViewOfFileFromApp(long long int64 long) kernelbase.MapViewOfFileFromApp
++@ stdcall MapViewOfFileFromApp(long long int64 long) KERNELBASE.MapViewOfFileFromApp
+ @ stdcall Module32First(long ptr)
+ @ stdcall Module32FirstW(long ptr)
+ @ stdcall Module32Next(long ptr)
+@@ -1502,7 +1502,7 @@
+ @ stdcall -import SetThreadPriorityBoost(long long)
+ @ stdcall -import SetThreadSelectedCpuSets(ptr ptr long)
+ @ stdcall -import SetThreadStackGuarantee(ptr)
+-@ stdcall SetThreadToken(ptr ptr) kernelbase.SetThreadToken
++@ stdcall SetThreadToken(ptr ptr) KERNELBASE.SetThreadToken
+ @ stdcall -import SetThreadUILanguage(long)
+ @ stdcall -import SetThreadpoolStackInformation(ptr ptr)
+ @ stdcall SetThreadpoolThreadMaximum(ptr long) NTDLL.TpSetPoolMaxThreads
+@@ -1732,3 +1732,331 @@
+ # Unix files
+ @ cdecl wine_get_unix_file_name(wstr)
+ @ cdecl wine_get_dos_file_name(str)
++
++# Porthole 0064: Windows 10 exports ours lacked (ios_missing_exports.c)
++@ stdcall ActivateActCtxWorker() ios_k32_stub_ActivateActCtxWorker
++@ stdcall AddIntegrityLabelToBoundaryDescriptor() ios_k32_stub_AddIntegrityLabelToBoundaryDescriptor
++@ stdcall AddLocalAlternateComputerNameA() ios_k32_stub_AddLocalAlternateComputerNameA
++@ stdcall AddLocalAlternateComputerNameW() ios_k32_stub_AddLocalAlternateComputerNameW
++@ stdcall AddRefActCtxWorker() ios_k32_stub_AddRefActCtxWorker
++@ stdcall AddResourceAttributeAce() ios_k32_stub_AddResourceAttributeAce
++@ stdcall AddSIDToBoundaryDescriptor() ios_k32_stub_AddSIDToBoundaryDescriptor
++@ stdcall AddScopedPolicyIDAce() ios_k32_stub_AddScopedPolicyIDAce
++@ stdcall AddSecureMemoryCacheCallback() ios_k32_stub_AddSecureMemoryCacheCallback
++@ stdcall AdjustCalendarDate() ios_k32_stub_AdjustCalendarDate
++@ stdcall AppPolicyGetClrCompat() ios_k32_stub_AppPolicyGetClrCompat
++@ stdcall AppPolicyGetCreateFileAccess() ios_k32_stub_AppPolicyGetCreateFileAccess
++@ stdcall AppPolicyGetLifecycleManagement() ios_k32_stub_AppPolicyGetLifecycleManagement
++@ stdcall AppPolicyGetProcessTerminationMethod() ios_k32_stub_AppPolicyGetProcessTerminationMethod
++@ stdcall AppPolicyGetShowDeveloperDiagnostic() ios_k32_stub_AppPolicyGetShowDeveloperDiagnostic
++@ stdcall AppPolicyGetThreadInitializationType() ios_k32_stub_AppPolicyGetThreadInitializationType
++@ stdcall AppXGetOSMaxVersionTested() ios_k32_stub_AppXGetOSMaxVersionTested
++@ stdcall BaseCheckAppcompatCacheEx() ios_k32_stub_BaseCheckAppcompatCacheEx
++@ stdcall BaseCheckAppcompatCacheExWorker() ios_k32_stub_BaseCheckAppcompatCacheExWorker
++@ stdcall BaseCheckAppcompatCacheWorker() ios_k32_stub_BaseCheckAppcompatCacheWorker
++@ stdcall BaseCheckElevation() ios_k32_stub_BaseCheckElevation
++@ stdcall BaseCleanupAppcompatCacheSupportWorker() ios_k32_stub_BaseCleanupAppcompatCacheSupportWorker
++@ stdcall BaseDestroyVDMEnvironment() ios_k32_stub_BaseDestroyVDMEnvironment
++@ stdcall BaseDllReadWriteIniFile() ios_k32_stub_BaseDllReadWriteIniFile
++@ stdcall BaseDumpAppcompatCacheWorker() ios_k32_stub_BaseDumpAppcompatCacheWorker
++@ stdcall BaseElevationPostProcessing() ios_k32_stub_BaseElevationPostProcessing
++@ stdcall BaseFlushAppcompatCacheWorker() ios_k32_stub_BaseFlushAppcompatCacheWorker
++@ stdcall BaseFormatObjectAttributes() ios_k32_stub_BaseFormatObjectAttributes
++@ stdcall BaseFormatTimeOut() ios_k32_stub_BaseFormatTimeOut
++@ stdcall BaseFreeAppCompatDataForProcessWorker() ios_k32_stub_BaseFreeAppCompatDataForProcessWorker
++@ stdcall BaseGenerateAppCompatData() ios_k32_stub_BaseGenerateAppCompatData
++@ stdcall BaseInitAppcompatCacheSupportWorker() ios_k32_stub_BaseInitAppcompatCacheSupportWorker
++@ stdcall BaseIsAppcompatInfrastructureDisabled() ios_k32_stub_BaseIsAppcompatInfrastructureDisabled
++@ stdcall BaseIsAppcompatInfrastructureDisabledWorker() ios_k32_stub_BaseIsAppcompatInfrastructureDisabledWorker
++@ stdcall BaseIsDosApplication() ios_k32_stub_BaseIsDosApplication
++@ stdcall BaseQueryModuleData() ios_k32_stub_BaseQueryModuleData
++@ stdcall BaseReadAppCompatDataForProcessWorker() ios_k32_stub_BaseReadAppCompatDataForProcessWorker
++@ stdcall BaseSetLastNTError() ios_k32_stub_BaseSetLastNTError
++@ stdcall BaseUpdateAppcompatCacheWorker() ios_k32_stub_BaseUpdateAppcompatCacheWorker
++@ stdcall BaseUpdateVDMEntry() ios_k32_stub_BaseUpdateVDMEntry
++@ stdcall BaseVerifyUnicodeString() ios_k32_stub_BaseVerifyUnicodeString
++@ stdcall BaseWriteErrorElevationRequiredEvent() ios_k32_stub_BaseWriteErrorElevationRequiredEvent
++@ stdcall Basep8BitStringToDynamicUnicodeString() ios_k32_stub_Basep8BitStringToDynamicUnicodeString
++@ stdcall BasepAllocateActivationContextActivationBlock() ios_k32_stub_BasepAllocateActivationContextActivationBlock
++@ stdcall BasepAnsiStringToDynamicUnicodeString() ios_k32_stub_BasepAnsiStringToDynamicUnicodeString
++@ stdcall BasepAppContainerEnvironmentExtension() ios_k32_stub_BasepAppContainerEnvironmentExtension
++@ stdcall BasepAppXExtension() ios_k32_stub_BasepAppXExtension
++@ stdcall BasepCheckAppCompat() ios_k32_stub_BasepCheckAppCompat
++@ stdcall BasepCheckWebBladeHashes() ios_k32_stub_BasepCheckWebBladeHashes
++@ stdcall BasepCheckWinSaferRestrictions() ios_k32_stub_BasepCheckWinSaferRestrictions
++@ stdcall BasepConstructSxsCreateProcessMessage() ios_k32_stub_BasepConstructSxsCreateProcessMessage
++@ stdcall BasepCopyEncryption() ios_k32_stub_BasepCopyEncryption
++@ stdcall BasepFreeActivationContextActivationBlock() ios_k32_stub_BasepFreeActivationContextActivationBlock
++@ stdcall BasepFreeAppCompatData() ios_k32_stub_BasepFreeAppCompatData
++@ stdcall BasepGetAppCompatData() ios_k32_stub_BasepGetAppCompatData
++@ stdcall BasepGetComputerNameFromNtPath() ios_k32_stub_BasepGetComputerNameFromNtPath
++@ stdcall BasepGetExeArchType() ios_k32_stub_BasepGetExeArchType
++@ stdcall BasepInitAppCompatData() ios_k32_stub_BasepInitAppCompatData
++@ stdcall BasepIsProcessAllowed() ios_k32_stub_BasepIsProcessAllowed
++@ stdcall BasepMapModuleHandle() ios_k32_stub_BasepMapModuleHandle
++@ stdcall BasepNotifyLoadStringResource() ios_k32_stub_BasepNotifyLoadStringResource
++@ stdcall BasepPostSuccessAppXExtension() ios_k32_stub_BasepPostSuccessAppXExtension
++@ stdcall BasepProcessInvalidImage() ios_k32_stub_BasepProcessInvalidImage
++@ stdcall BasepQueryAppCompat() ios_k32_stub_BasepQueryAppCompat
++@ stdcall BasepQueryModuleChpeSettings() ios_k32_stub_BasepQueryModuleChpeSettings
++@ stdcall BasepReleaseAppXContext() ios_k32_stub_BasepReleaseAppXContext
++@ stdcall BasepReleaseSxsCreateProcessUtilityStruct() ios_k32_stub_BasepReleaseSxsCreateProcessUtilityStruct
++@ stdcall BasepReportFault() ios_k32_stub_BasepReportFault
++@ stdcall BasepSetFileEncryptionCompression() ios_k32_stub_BasepSetFileEncryptionCompression
++@ stdcall CeipIsOptedIn() ios_k32_stub_CeipIsOptedIn
++@ stdcall CheckAllowDecryptedRemoteDestinationPolicy() ios_k32_stub_CheckAllowDecryptedRemoteDestinationPolicy
++@ stdcall CheckElevation() ios_k32_stub_CheckElevation
++@ stdcall CheckElevationEnabled() ios_k32_stub_CheckElevationEnabled
++@ stdcall CheckForReadOnlyResource() ios_k32_stub_CheckForReadOnlyResource
++@ stdcall CheckForReadOnlyResourceFilter() ios_k32_stub_CheckForReadOnlyResourceFilter
++@ stdcall CheckTokenCapability() ios_k32_stub_CheckTokenCapability
++@ stdcall CheckTokenMembershipEx() ios_k32_stub_CheckTokenMembershipEx
++@ stdcall ClosePackageInfo() ios_k32_stub_ClosePackageInfo
++@ stdcall ClosePrivateNamespace() ios_k32_stub_ClosePrivateNamespace
++@ stdcall CloseState() ios_k32_stub_CloseState
++@ stdcall CompareCalendarDates() ios_k32_stub_CompareCalendarDates
++@ stdcall ConvertCalDateTimeToSystemTime() ios_k32_stub_ConvertCalDateTimeToSystemTime
++@ stdcall ConvertNLSDayOfWeekToWin32DayOfWeek() ios_k32_stub_ConvertNLSDayOfWeekToWin32DayOfWeek
++@ stdcall ConvertSystemTimeToCalDateTime() ios_k32_stub_ConvertSystemTimeToCalDateTime
++@ stdcall CopyFileTransactedA() ios_k32_stub_CopyFileTransactedA
++@ stdcall CopyFileTransactedW() ios_k32_stub_CopyFileTransactedW
++@ stdcall CreateActCtxWWorker() ios_k32_stub_CreateActCtxWWorker
++@ stdcall CreateEnclave() ios_k32_stub_CreateEnclave
++@ stdcall CreateFileMappingNumaA() ios_k32_stub_CreateFileMappingNumaA
++@ stdcall CreateJobSet() ios_k32_stub_CreateJobSet
++@ stdcall CreatePrivateNamespaceA() ios_k32_stub_CreatePrivateNamespaceA
++@ stdcall CreatePrivateNamespaceW() ios_k32_stub_CreatePrivateNamespaceW
++@ stdcall CreateSymbolicLinkTransactedA() ios_k32_stub_CreateSymbolicLinkTransactedA
++@ stdcall CreateSymbolicLinkTransactedW() ios_k32_stub_CreateSymbolicLinkTransactedW
++@ stdcall DeactivateActCtxWorker() ios_k32_stub_DeactivateActCtxWorker
++@ stdcall DeleteBoundaryDescriptor() ios_k32_stub_DeleteBoundaryDescriptor
++@ stdcall DisableThreadProfiling() ios_k32_stub_DisableThreadProfiling
++@ stdcall DnsHostnameToComputerNameExW() ios_k32_stub_DnsHostnameToComputerNameExW
++@ stdcall DosPathToSessionPathA() ios_k32_stub_DosPathToSessionPathA
++@ stdcall DosPathToSessionPathW() ios_k32_stub_DosPathToSessionPathW
++@ stdcall DuplicateEncryptionInfoFileExt() ios_k32_stub_DuplicateEncryptionInfoFileExt
++@ stdcall EnableThreadProfiling() ios_k32_stub_EnableThreadProfiling
++@ stdcall EnumSystemGeoNames() ios_k32_stub_EnumSystemGeoNames
++@ stdcall EnumerateLocalComputerNamesA() ios_k32_stub_EnumerateLocalComputerNamesA
++@ stdcall EnumerateLocalComputerNamesW() ios_k32_stub_EnumerateLocalComputerNamesW
++@ stdcall FindActCtxSectionGuidWorker() ios_k32_stub_FindActCtxSectionGuidWorker
++@ stdcall FindActCtxSectionStringWWorker() ios_k32_stub_FindActCtxSectionStringWWorker
++@ stdcall FindFirstFileNameTransactedW() ios_k32_stub_FindFirstFileNameTransactedW
++@ stdcall FindFirstStreamTransactedW() ios_k32_stub_FindFirstStreamTransactedW
++@ stdcall FindNextFileNameW() ios_k32_stub_FindNextFileNameW
++@ stdcall FindPackagesByPackageFamily() ios_k32_stub_FindPackagesByPackageFamily
++@ stdcall FormatApplicationUserModelId() ios_k32_stub_FormatApplicationUserModelId
++@ stdcall FreeMemoryJobObject() ios_k32_stub_FreeMemoryJobObject
++@ stdcall GetAppContainerAce() ios_k32_stub_GetAppContainerAce
++@ stdcall GetAppContainerNamedObjectPath() ios_k32_stub_GetAppContainerNamedObjectPath
++@ stdcall GetApplicationRecoveryCallback() ios_k32_stub_GetApplicationRecoveryCallback
++@ stdcall GetApplicationRecoveryCallbackWorker() ios_k32_stub_GetApplicationRecoveryCallbackWorker
++@ stdcall GetApplicationRestartSettingsWorker() ios_k32_stub_GetApplicationRestartSettingsWorker
++@ stdcall GetApplicationUserModelId() ios_k32_stub_GetApplicationUserModelId
++@ stdcall GetCachedSigningLevel() ios_k32_stub_GetCachedSigningLevel
++@ stdcall GetCalendarDateFormat() ios_k32_stub_GetCalendarDateFormat
++@ stdcall GetCalendarDateFormatEx() ios_k32_stub_GetCalendarDateFormatEx
++@ stdcall GetCalendarDaysInMonth() ios_k32_stub_GetCalendarDaysInMonth
++@ stdcall GetCalendarDifferenceInDays() ios_k32_stub_GetCalendarDifferenceInDays
++@ stdcall GetCalendarMonthsInYear() ios_k32_stub_GetCalendarMonthsInYear
++@ stdcall GetCalendarSupportedDateRange() ios_k32_stub_GetCalendarSupportedDateRange
++@ stdcall GetCalendarWeekNumber() ios_k32_stub_GetCalendarWeekNumber
++@ stdcall GetComPlusPackageInstallStatus() ios_k32_stub_GetComPlusPackageInstallStatus
++@ stdcall GetCompressedFileSizeTransactedA() ios_k32_stub_GetCompressedFileSizeTransactedA
++@ stdcall GetCompressedFileSizeTransactedW() ios_k32_stub_GetCompressedFileSizeTransactedW
++@ stdcall GetConsoleHistoryInfo() ios_k32_stub_GetConsoleHistoryInfo
++@ stdcall GetConsoleSelectionInfo() ios_k32_stub_GetConsoleSelectionInfo
++@ stdcall GetCurrentActCtxWorker() ios_k32_stub_GetCurrentActCtxWorker
++@ stdcall GetDateFormatAWorker() ios_k32_stub_GetDateFormatAWorker
++@ stdcall GetDateFormatWWorker() ios_k32_stub_GetDateFormatWWorker
++@ stdcall GetDurationFormat() ios_k32_stub_GetDurationFormat
++@ stdcall GetDurationFormatEx() ios_k32_stub_GetDurationFormatEx
++@ stdcall GetEncryptedFileVersionExt() ios_k32_stub_GetEncryptedFileVersionExt
++@ stdcall GetEraNameCountedString() ios_k32_stub_GetEraNameCountedString
++@ stdcall GetFileBandwidthReservation() ios_k32_stub_GetFileBandwidthReservation
++@ stdcall GetFirmwareEnvironmentVariableExA() ios_k32_stub_GetFirmwareEnvironmentVariableExA
++@ stdcall GetFirmwareEnvironmentVariableExW() ios_k32_stub_GetFirmwareEnvironmentVariableExW
++@ stdcall GetFullPathNameTransactedA() ios_k32_stub_GetFullPathNameTransactedA
++@ stdcall GetFullPathNameTransactedW() ios_k32_stub_GetFullPathNameTransactedW
++@ stdcall GetLongPathNameTransactedA() ios_k32_stub_GetLongPathNameTransactedA
++@ stdcall GetLongPathNameTransactedW() ios_k32_stub_GetLongPathNameTransactedW
++@ stdcall GetMemoryErrorHandlingCapabilities() ios_k32_stub_GetMemoryErrorHandlingCapabilities
++@ stdcall GetNamedPipeAttribute() ios_k32_stub_GetNamedPipeAttribute
++@ stdcall GetNamedPipeClientComputerNameA() ios_k32_stub_GetNamedPipeClientComputerNameA
++@ stdcall GetNamedPipeClientComputerNameW() ios_k32_stub_GetNamedPipeClientComputerNameW
++@ stdcall GetNumaNodeNumberFromHandle() ios_k32_stub_GetNumaNodeNumberFromHandle
++@ stdcall GetPackageApplicationIds() ios_k32_stub_GetPackageApplicationIds
++@ stdcall GetPackageId() ios_k32_stub_GetPackageId
++@ stdcall GetPackageInfo() ios_k32_stub_GetPackageInfo
++@ stdcall GetPackagePath() ios_k32_stub_GetPackagePath
++@ stdcall GetProcessDefaultCpuSets() ios_k32_stub_GetProcessDefaultCpuSets
++@ stdcall GetProcessorSystemCycleTime() ios_k32_stub_GetProcessorSystemCycleTime
++@ stdcall GetStagedPackagePathByFullName() ios_k32_stub_GetStagedPackagePathByFullName
++@ stdcall GetStateFolder() ios_k32_stub_GetStateFolder
++@ stdcall GetStringScripts() ios_k32_stub_GetStringScripts
++@ stdcall GetSystemAppDataKey() ios_k32_stub_GetSystemAppDataKey
++@ stdcall GetThreadInformation() ios_k32_stub_GetThreadInformation
++@ stdcall GetThreadSelectedCpuSets() ios_k32_stub_GetThreadSelectedCpuSets
++@ stdcall GetTimeFormatAWorker() ios_k32_stub_GetTimeFormatAWorker
++@ stdcall GetTimeFormatWWorker() ios_k32_stub_GetTimeFormatWWorker
++@ stdcall GetUILanguageInfo() ios_k32_stub_GetUILanguageInfo
++@ stdcall GetUmsSystemThreadInformation() ios_k32_stub_GetUmsSystemThreadInformation
++@ stdcall GlobalAddAtomExA() ios_k32_stub_GlobalAddAtomExA
++@ stdcall GlobalAddAtomExW() ios_k32_stub_GlobalAddAtomExW
++@ stdcall InitializeEnclave() ios_k32_stub_InitializeEnclave
++@ stdcall InstallELAMCertificateInfo() ios_k32_stub_InstallELAMCertificateInfo
++@ stdcall IsCalendarLeapDay() ios_k32_stub_IsCalendarLeapDay
++@ stdcall IsCalendarLeapMonth() ios_k32_stub_IsCalendarLeapMonth
++@ stdcall IsCalendarLeapYear() ios_k32_stub_IsCalendarLeapYear
++@ stdcall IsEnclaveTypeSupported() ios_k32_stub_IsEnclaveTypeSupported
++@ stdcall IsNativeVhdBoot() ios_k32_stub_IsNativeVhdBoot
++@ stdcall IsProcessCritical() ios_k32_stub_IsProcessCritical
++@ stdcall IsValidCalDateTime() ios_k32_stub_IsValidCalDateTime
++@ stdcall IsWow64GuestMachineSupported() ios_k32_stub_IsWow64GuestMachineSupported
++@ stdcall LZCloseFile() ios_k32_stub_LZCloseFile
++@ stdcall LZCreateFileW() ios_k32_stub_LZCreateFileW
++@ stdcall LoadEnclaveData() ios_k32_stub_LoadEnclaveData
++@ stdcall LoadStringBaseExW() ios_k32_stub_LoadStringBaseExW
++@ stdcall LoadStringBaseW() ios_k32_stub_LoadStringBaseW
++@ stdcall LocalFileTimeToLocalSystemTime() ios_k32_stub_LocalFileTimeToLocalSystemTime
++@ stdcall LocalSystemTimeToLocalFileTime() ios_k32_stub_LocalSystemTimeToLocalFileTime
++@ stdcall MapUserPhysicalPagesScatter() ios_k32_stub_MapUserPhysicalPagesScatter
++@ stdcall NlsCheckPolicy() ios_k32_stub_NlsCheckPolicy
++@ stdcall NlsEventDataDescCreate() ios_k32_stub_NlsEventDataDescCreate
++@ stdcall NlsGetCacheUpdateCount() ios_k32_stub_NlsGetCacheUpdateCount
++@ stdcall NlsUpdateLocale() ios_k32_stub_NlsUpdateLocale
++@ stdcall NlsUpdateSystemLocale() ios_k32_stub_NlsUpdateSystemLocale
++@ stdcall NlsWriteEtwEvent() ios_k32_stub_NlsWriteEtwEvent
++@ stdcall NotifyMountMgr() ios_k32_stub_NotifyMountMgr
++@ stdcall NotifyUILanguageChange() ios_k32_stub_NotifyUILanguageChange
++@ stdcall NtVdm64CreateProcessInternalW() ios_k32_stub_NtVdm64CreateProcessInternalW
++@ stdcall OOBEComplete() ios_k32_stub_OOBEComplete
++@ stdcall OfferVirtualMemory() ios_k32_stub_OfferVirtualMemory
++@ stdcall OpenConsoleWStub() ios_k32_stub_OpenConsoleWStub
++@ stdcall OpenPackageInfoByFullName() ios_k32_stub_OpenPackageInfoByFullName
++@ stdcall OpenPrivateNamespaceA() ios_k32_stub_OpenPrivateNamespaceA
++@ stdcall OpenPrivateNamespaceW() ios_k32_stub_OpenPrivateNamespaceW
++@ stdcall OpenState() ios_k32_stub_OpenState
++@ stdcall OpenStateExplicit() ios_k32_stub_OpenStateExplicit
++@ stdcall PackageFamilyNameFromFullName() ios_k32_stub_PackageFamilyNameFromFullName
++@ stdcall PackageFamilyNameFromId() ios_k32_stub_PackageFamilyNameFromId
++@ stdcall PackageFullNameFromId() ios_k32_stub_PackageFullNameFromId
++@ stdcall PackageNameAndPublisherIdFromFamilyName() ios_k32_stub_PackageNameAndPublisherIdFromFamilyName
++@ stdcall ParseApplicationUserModelId() ios_k32_stub_ParseApplicationUserModelId
++@ stdcall PssCaptureSnapshot() ios_k32_stub_PssCaptureSnapshot
++@ stdcall PssDuplicateSnapshot() ios_k32_stub_PssDuplicateSnapshot
++@ stdcall PssFreeSnapshot() ios_k32_stub_PssFreeSnapshot
++@ stdcall PssQuerySnapshot() ios_k32_stub_PssQuerySnapshot
++@ stdcall PssWalkMarkerCreate() ios_k32_stub_PssWalkMarkerCreate
++@ stdcall PssWalkMarkerFree() ios_k32_stub_PssWalkMarkerFree
++@ stdcall PssWalkMarkerGetPosition() ios_k32_stub_PssWalkMarkerGetPosition
++@ stdcall PssWalkMarkerRewind() ios_k32_stub_PssWalkMarkerRewind
++@ stdcall PssWalkMarkerSeek() ios_k32_stub_PssWalkMarkerSeek
++@ stdcall PssWalkMarkerSeekToBeginning() ios_k32_stub_PssWalkMarkerSeekToBeginning
++@ stdcall PssWalkMarkerSetPosition() ios_k32_stub_PssWalkMarkerSetPosition
++@ stdcall PssWalkMarkerTell() ios_k32_stub_PssWalkMarkerTell
++@ stdcall PssWalkSnapshot() ios_k32_stub_PssWalkSnapshot
++@ stdcall QueryActCtxSettingsWWorker() ios_k32_stub_QueryActCtxSettingsWWorker
++@ stdcall QueryActCtxWWorker() ios_k32_stub_QueryActCtxWWorker
++@ stdcall QueryIoRateControlInformationJobObject() ios_k32_stub_QueryIoRateControlInformationJobObject
++@ stdcall QueryProcessAffinityUpdateMode() ios_k32_stub_QueryProcessAffinityUpdateMode
++@ stdcall QueryProtectedPolicy() ios_k32_stub_QueryProtectedPolicy
++@ stdcall QueryThreadProfiling() ios_k32_stub_QueryThreadProfiling
++@ stdcall QuirkGetData2Worker() ios_k32_stub_QuirkGetData2Worker
++@ stdcall QuirkGetDataWorker() ios_k32_stub_QuirkGetDataWorker
++@ stdcall QuirkIsEnabled2Worker() ios_k32_stub_QuirkIsEnabled2Worker
++@ stdcall QuirkIsEnabled3Worker() ios_k32_stub_QuirkIsEnabled3Worker
++@ stdcall QuirkIsEnabledForPackage2Worker() ios_k32_stub_QuirkIsEnabledForPackage2Worker
++@ stdcall QuirkIsEnabledForPackage3Worker() ios_k32_stub_QuirkIsEnabledForPackage3Worker
++@ stdcall QuirkIsEnabledForPackage4Worker() ios_k32_stub_QuirkIsEnabledForPackage4Worker
++@ stdcall QuirkIsEnabledForPackageWorker() ios_k32_stub_QuirkIsEnabledForPackageWorker
++@ stdcall QuirkIsEnabledForProcessWorker() ios_k32_stub_QuirkIsEnabledForProcessWorker
++@ stdcall QuirkIsEnabledWorker() ios_k32_stub_QuirkIsEnabledWorker
++@ stdcall RaiseInvalid16BitExeError() ios_k32_stub_RaiseInvalid16BitExeError
++@ stdcall ReadDirectoryChangesExW() ios_k32_stub_ReadDirectoryChangesExW
++@ stdcall ReadThreadProfilingData() ios_k32_stub_ReadThreadProfilingData
++@ stdcall ReclaimVirtualMemory() ios_k32_stub_ReclaimVirtualMemory
++@ stdcall RegCopyTreeW() ios_k32_stub_RegCopyTreeW
++@ stdcall RegDisablePredefinedCacheEx() ios_k32_stub_RegDisablePredefinedCacheEx
++@ stdcall RegisterBadMemoryNotification() ios_k32_stub_RegisterBadMemoryNotification
++@ stdcall RegisterWaitUntilOOBECompleted() ios_k32_stub_RegisterWaitUntilOOBECompleted
++@ stdcall ReleaseActCtxWorker() ios_k32_stub_ReleaseActCtxWorker
++@ stdcall RemoveLocalAlternateComputerNameA() ios_k32_stub_RemoveLocalAlternateComputerNameA
++@ stdcall RemoveLocalAlternateComputerNameW() ios_k32_stub_RemoveLocalAlternateComputerNameW
++@ stdcall RemoveSecureMemoryCacheCallback() ios_k32_stub_RemoveSecureMemoryCacheCallback
++@ stdcall ReplacePartitionUnit() ios_k32_stub_ReplacePartitionUnit
++@ stdcall ResolveDelayLoadsFromDll() ios_k32_stub_ResolveDelayLoadsFromDll
++@ stdcall SetComPlusPackageInstallStatus() ios_k32_stub_SetComPlusPackageInstallStatus
++@ stdcall SetComputerNameEx2W() ios_k32_stub_SetComputerNameEx2W
++@ stdcall SetConsoleHistoryInfo() ios_k32_stub_SetConsoleHistoryInfo
++@ stdcall SetDynamicTimeZoneInformation() ios_k32_stub_SetDynamicTimeZoneInformation
++@ stdcall SetFileAttributesTransactedA() ios_k32_stub_SetFileAttributesTransactedA
++@ stdcall SetFileAttributesTransactedW() ios_k32_stub_SetFileAttributesTransactedW
++@ stdcall SetFileBandwidthReservation() ios_k32_stub_SetFileBandwidthReservation
++@ stdcall SetFileIoOverlappedRange() ios_k32_stub_SetFileIoOverlappedRange
++@ stdcall SetFileShortNameA() ios_k32_stub_SetFileShortNameA
++@ stdcall SetFileShortNameW() ios_k32_stub_SetFileShortNameW
++@ stdcall SetFirmwareEnvironmentVariableExA() ios_k32_stub_SetFirmwareEnvironmentVariableExA
++@ stdcall SetFirmwareEnvironmentVariableExW() ios_k32_stub_SetFirmwareEnvironmentVariableExW
++@ stdcall SetIoRateControlInformationJobObject() ios_k32_stub_SetIoRateControlInformationJobObject
++@ stdcall SetLocalPrimaryComputerNameA() ios_k32_stub_SetLocalPrimaryComputerNameA
++@ stdcall SetLocalPrimaryComputerNameW() ios_k32_stub_SetLocalPrimaryComputerNameW
++@ stdcall SetNamedPipeAttribute() ios_k32_stub_SetNamedPipeAttribute
++@ stdcall SetProtectedPolicy() ios_k32_stub_SetProtectedPolicy
++@ stdcall SetThreadpoolTimerEx() ios_k32_stub_SetThreadpoolTimerEx
++@ stdcall SetThreadpoolWaitEx() ios_k32_stub_SetThreadpoolWaitEx
++@ stdcall SetVolumeMountPointWStub() ios_k32_stub_SetVolumeMountPointWStub
++@ stdcall SortCloseHandle() ios_k32_stub_SortCloseHandle
++@ stdcall SortGetHandle() ios_k32_stub_SortGetHandle
++@ stdcall SystemTimeToTzSpecificLocalTimeEx() ios_k32_stub_SystemTimeToTzSpecificLocalTimeEx
++@ stdcall TermsrvConvertSysRootToUserDir() ios_k32_stub_TermsrvConvertSysRootToUserDir
++@ stdcall TermsrvCreateRegEntry() ios_k32_stub_TermsrvCreateRegEntry
++@ stdcall TermsrvDeleteKey() ios_k32_stub_TermsrvDeleteKey
++@ stdcall TermsrvDeleteValue() ios_k32_stub_TermsrvDeleteValue
++@ stdcall TermsrvGetPreSetValue() ios_k32_stub_TermsrvGetPreSetValue
++@ stdcall TermsrvGetWindowsDirectoryA() ios_k32_stub_TermsrvGetWindowsDirectoryA
++@ stdcall TermsrvGetWindowsDirectoryW() ios_k32_stub_TermsrvGetWindowsDirectoryW
++@ stdcall TermsrvOpenRegEntry() ios_k32_stub_TermsrvOpenRegEntry
++@ stdcall TermsrvOpenUserClasses() ios_k32_stub_TermsrvOpenUserClasses
++@ stdcall TermsrvRestoreKey() ios_k32_stub_TermsrvRestoreKey
++@ stdcall TermsrvSetKeySecurity() ios_k32_stub_TermsrvSetKeySecurity
++@ stdcall TermsrvSetValueKey() ios_k32_stub_TermsrvSetValueKey
++@ stdcall TermsrvSyncUserIniFileExt() ios_k32_stub_TermsrvSyncUserIniFileExt
++@ stdcall TzSpecificLocalTimeToSystemTimeEx() ios_k32_stub_TzSpecificLocalTimeToSystemTimeEx
++@ stdcall UTRegister() ios_k32_stub_UTRegister
++@ stdcall UTUnRegister() ios_k32_stub_UTUnRegister
++@ stdcall UnregisterApplicationRecoveryCallback() ios_k32_stub_UnregisterApplicationRecoveryCallback
++@ stdcall UnregisterBadMemoryNotification() ios_k32_stub_UnregisterBadMemoryNotification
++@ stdcall UnregisterConsoleIME() ios_k32_stub_UnregisterConsoleIME
++@ stdcall UnregisterWaitUntilOOBECompleted() ios_k32_stub_UnregisterWaitUntilOOBECompleted
++@ stdcall UpdateCalendarDayOfWeek() ios_k32_stub_UpdateCalendarDayOfWeek
++@ stdcall VerifyScripts() ios_k32_stub_VerifyScripts
++@ stdcall WerGetFlagsWorker() ios_k32_stub_WerGetFlagsWorker
++@ stdcall WerRegisterAdditionalProcess() ios_k32_stub_WerRegisterAdditionalProcess
++@ stdcall WerRegisterAppLocalDump() ios_k32_stub_WerRegisterAppLocalDump
++@ stdcall WerRegisterExcludedMemoryBlock() ios_k32_stub_WerRegisterExcludedMemoryBlock
++@ stdcall WerRegisterFileWorker() ios_k32_stub_WerRegisterFileWorker
++@ stdcall WerRegisterMemoryBlockWorker() ios_k32_stub_WerRegisterMemoryBlockWorker
++@ stdcall WerRegisterRuntimeExceptionModuleWorker() ios_k32_stub_WerRegisterRuntimeExceptionModuleWorker
++@ stdcall WerSetFlagsWorker() ios_k32_stub_WerSetFlagsWorker
++@ stdcall WerUnregisterAdditionalProcess() ios_k32_stub_WerUnregisterAdditionalProcess
++@ stdcall WerUnregisterAppLocalDump() ios_k32_stub_WerUnregisterAppLocalDump
++@ stdcall WerUnregisterExcludedMemoryBlock() ios_k32_stub_WerUnregisterExcludedMemoryBlock
++@ stdcall WerUnregisterFileWorker() ios_k32_stub_WerUnregisterFileWorker
++@ stdcall WerUnregisterMemoryBlockWorker() ios_k32_stub_WerUnregisterMemoryBlockWorker
++@ stdcall WerUnregisterRuntimeExceptionModuleWorker() ios_k32_stub_WerUnregisterRuntimeExceptionModuleWorker
++@ stdcall WerpGetDebugger() ios_k32_stub_WerpGetDebugger
++@ stdcall WerpInitiateRemoteRecovery() ios_k32_stub_WerpInitiateRemoteRecovery
++@ stdcall WerpLaunchAeDebug() ios_k32_stub_WerpLaunchAeDebug
++@ stdcall WerpNotifyLoadStringResourceWorker() ios_k32_stub_WerpNotifyLoadStringResourceWorker
++@ stdcall WerpNotifyUseStringResourceWorker() ios_k32_stub_WerpNotifyUseStringResourceWorker
++@ stdcall Wow64SuspendThread() ios_k32_stub_Wow64SuspendThread
++@ stdcall ZombifyActCtxWorker() ios_k32_stub_ZombifyActCtxWorker
++@ stdcall uaw_lstrcmpW() ios_k32_stub_uaw_lstrcmpW
++@ stdcall uaw_lstrcmpiW() ios_k32_stub_uaw_lstrcmpiW
++@ stdcall uaw_lstrlenW() ios_k32_stub_uaw_lstrlenW
++@ stdcall uaw_wcschr() ios_k32_stub_uaw_wcschr
++@ stdcall uaw_wcscpy() ios_k32_stub_uaw_wcscpy
++@ stdcall uaw_wcsicmp() ios_k32_stub_uaw_wcsicmp
++@ stdcall uaw_wcslen() ios_k32_stub_uaw_wcslen
++@ stdcall uaw_wcsrchr() ios_k32_stub_uaw_wcsrchr
+--- a/dlls/kernel32/Makefile.in
++++ b/dlls/kernel32/Makefile.in
+@@ -15,6 +15,7 @@
+ 	debugger.c \
+ 	file.c \
+ 	heap.c \
++	ios_missing_exports.c \
+ 	kernel_main.c \
+ 	locale.c \
+ 	lzexpand.c \

@@ -1,0 +1,29 @@
+--- a/build/ntdll-unix/process_ios.c
++++ b/build/ntdll-unix/process_ios.c
+@@ -1119,6 +1119,26 @@
+     TRACE( "%s image %s cmdline %s parent %p machine %x\n", debugstr_us( &path ),
+            debugstr_us( &params->ImagePathName ), debugstr_us( &params->CommandLine ), parent, machine );
+ #ifdef WINE_IOS
++    /* Porthole 0066 (experiment): Steam's client hands the game's program over with its name in LOWER case ("...\blackops3.exe"; the file on
++     * disk and the one Steam's own library lists is "BlackOps3.exe"). The protection of Black Ops 3 reads its own image path and module name
++     * and spins forever with the lower-case form; give it the on-disk spelling in the image path and the command line. */
++    {
++        static const WCHAR want[] = {'B','l','a','c','k','O','p','s','3','.','e','x','e',0};
++        UNICODE_STRING *strs[2] = { &params->ImagePathName, &params->CommandLine };
++        unsigned int k, i, j, n = ARRAY_SIZE(want) - 1;
++        for (k = 0; k < 2; k++)
++        {
++            WCHAR *b = strs[k]->Buffer;
++            unsigned int len = strs[k]->Length / sizeof(WCHAR);
++            if (!b) continue;
++            for (i = 0; i + n <= len; i++)
++            {
++                if (i && b[i - 1] != '\\') continue;
++                for (j = 0; j < n; j++) if ((b[i + j] | 0x20) != (want[j] | 0x20)) break;
++                if (j == n) { for (j = 0; j < n; j++) b[i + j] = want[j]; ERR( "[exe-case] 0066 %s fixed to the on-disk spelling\n", k ? "command line" : "image path" ); }
++            }
++        }
++    }
+     ERR("NtCreateUserProcess: image=%s cmdline=%s\n",
+         debugstr_us( &params->ImagePathName ), debugstr_us( &params->CommandLine ));
+ 

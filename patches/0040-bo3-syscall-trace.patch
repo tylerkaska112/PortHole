@@ -1,0 +1,63 @@
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -3540,8 +3540,60 @@
+ /*******************************************************************
+  *		dispatch_syscall
+  */
++/* Porthole 0040 (diagnostic): the Windows calls Black Ops 3's own code makes. Its protection runs ~15 s of obfuscated code and then calls a
++ * null pointer that looks like NtCreateSection; this lists every `syscall` the x64 code executes in that process (number, return
++ * address, first four arguments) so the log shows what it asked the system for before it failed. Nothing is changed. */
++static void trace_emulated_syscall( const ARM64_NT_CONTEXT *context )
++{
++    static int mode;     /* 0 = not decided, 1 = trace, 2 = off; per process (the EC ntdll is private to each) */
++    static LONG count;
++
++    if (!mode)
++    {
++        static const char want[] = "blackops3.exe";
++        const UNICODE_STRING *path = &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName;
++        unsigned int i, j, n = path->Length / sizeof(WCHAR);
++
++        mode = 2;
++        for (i = 0; path->Buffer && i + sizeof(want) - 1 <= n; i++)
++        {
++            for (j = 0; j < sizeof(want) - 1; j++)
++            {
++                WCHAR c = path->Buffer[i + j];
++                if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++                if (c != want[j]) break;
++            }
++            if (j == sizeof(want) - 1) { mode = 1; break; }
++        }
++        if (mode == 2)   /* the image path may be empty for a spawned process: try the command line too */
++        {
++            const UNICODE_STRING *cl = &NtCurrentTeb()->Peb->ProcessParameters->CommandLine;
++            n = cl->Length / sizeof(WCHAR);
++            for (i = 0; cl->Buffer && i + sizeof(want) - 1 <= n; i++)
++            {
++                for (j = 0; j < sizeof(want) - 1; j++)
++                {
++                    WCHAR c = cl->Buffer[i + j];
++                    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++                    if (c != want[j]) break;
++                }
++                if (j == sizeof(want) - 1) { mode = 1; break; }
++            }
++        }
++        ERR( "[sc] first syscall in this process: tid=%04lx mode=%d image=%s cmdline=%s\n", HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ), mode,
++             debugstr_wn( path->Buffer, min( path->Length / sizeof(WCHAR), 80 )),
++             debugstr_wn( NtCurrentTeb()->Peb->ProcessParameters->CommandLine.Buffer,
++                          min( NtCurrentTeb()->Peb->ProcessParameters->CommandLine.Length / sizeof(WCHAR), 80 )));
++    }
++    if (mode != 1 || count >= 40000 || InterlockedIncrement( &count ) > 40000) return;
++    ERR( "[sc] #%ld tid=%04lx ssn=%04lx ret=%p a1=%p a2=%p a3=%p a4=%p sp=%p\n", count, HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ),
++         (ULONG)context->X8, (void *)context->Pc, (void *)context->X4, (void *)context->X1, (void *)context->X2, (void *)context->X3,
++         (void *)context->Sp );
++}
++
+ static void dispatch_syscall( ARM64_NT_CONTEXT *context )
+ {
++    trace_emulated_syscall( context );
+     if (context->X8 < __nb_syscalls)  /* syscall number in rax */
+     {
+         context->X0 = context->X4;  /* get first param from r10 */

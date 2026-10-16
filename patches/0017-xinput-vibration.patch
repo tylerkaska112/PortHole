@@ -1,0 +1,68 @@
+diff --git a/build/win32u-unix/driver_ios.c b/build/win32u-unix/driver_ios.c
+--- a/build/win32u-unix/driver_ios.c
++++ b/build/win32u-unix/driver_ios.c
+@@ -2410,6 +2410,9 @@
+  * non-Madeira win32u returns for a code it does not know, so xinput1_3's
+  * runtime probe falls back to the existing HID path.
+  */
++/* Porthole 0017: defined by the app (it plays the motor speeds on the controller). */
++extern void winios_gamepad_set_vibration( int index, unsigned int left, unsigned int right );
++
+ ULONG_PTR ios_gamepad_query( UINT index, UINT op, void *buffer )
+ {
+     struct winios_gamepad pad;
+@@ -2445,14 +2448,20 @@
+          * (low bits clear, as real XInput reports them) and the triggers 8. */
+         caps->type     = 1;
+         caps->sub_type = 1;
+-        /* Controller rumble is not implemented by this transport. */
+-        caps->flags    = 0;
++        /* Porthole 0017: rumble is passed to the app (NtUserGamepadOp_Vibration), so the pad says it supports force feedback. */
++        caps->flags    = 0x0001;   /* XINPUT_CAPS_FFB_SUPPORTED */
+         caps->gamepad.buttons       = 0xf3ff;
+         caps->gamepad.left_trigger  = 0xff;
+         caps->gamepad.right_trigger = 0xff;
+         caps->gamepad.thumb_lx = caps->gamepad.thumb_ly = (SHORT)0xffc0;
+         caps->gamepad.thumb_rx = caps->gamepad.thumb_ry = (SHORT)0xffc0;
+-        caps->left_motor_speed = caps->right_motor_speed = 0;
++        caps->left_motor_speed = caps->right_motor_speed = 0xff;
++        return 1;
++    }
++    case 2:   /* NtUserGamepadOp_Vibration: XINPUT_VIBRATION (two WORDs, in) */
++    {
++        const WORD *v = buffer;
++        winios_gamepad_set_vibration( index, v[0], v[1] );
+         return 1;
+     }
+     default:
+diff --git a/wine/dlls/xinput1_3/main.c b/wine/dlls/xinput1_3/main.c
+index 869e4068..0a583078 100644
+--- a/wine/dlls/xinput1_3/main.c
++++ b/wine/dlls/xinput1_3/main.c
+@@ -875,8 +875,12 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputSetState(DWORD index, XINPUT_VIBRATION *vib
+     if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
+ 
+     if (!vibration) return ERROR_BAD_ARGUMENTS;
+-    /* Host capabilities do not advertise force feedback. */
+-    if (host_pad_state(index, &host_state)) return ERROR_SUCCESS;
++    /* Porthole 0017: the host pad has force feedback now. The motor speeds go to win32u, which hands them to the app. */
++    if (host_pad_state(index, &host_state))
++    {
++        NtUserGetGamepadState(index, NtUserGamepadOp_Vibration, vibration);
++        return ERROR_SUCCESS;
++    }
+ 
+     start_update_thread();
+ 
+diff --git a/wine/include/ntuser.h b/wine/include/ntuser.h
+index 20528bce..4a7e93fb 100644
+--- a/wine/include/ntuser.h
++++ b/wine/include/ntuser.h
+@@ -1241,6 +1241,7 @@ enum
+ {
+     NtUserGamepadOp_State,   /* buffer: XINPUT_STATE        (16 bytes, out) */
+     NtUserGamepadOp_Caps,    /* buffer: XINPUT_CAPABILITIES (20 bytes, out) */
++    NtUserGamepadOp_Vibration, /* buffer: XINPUT_VIBRATION    (4 bytes, in): Porthole 0017, the motor speeds a game asked for */
+ };
+ 
+ /* Returns TRUE when a pad is connected in `index` and `buffer` was filled.

@@ -1,0 +1,58 @@
+{
+  "great": {
+    "overall": null,
+    "forDevice": null,
+    "verdict": null,
+    "earlier": {
+      "reports": 1,
+      "verdict": "great",
+      "engine": "aaa1111-r0",
+      "appVersion": "0.50.34",
+      "date": "2026-10-03",
+      "verdictReports": 1
+    }
+  },
+  "playable": {
+    "overall": null,
+    "forDevice": null,
+    "verdict": null,
+    "earlier": {
+      "reports": 1,
+      "verdict": "playable",
+      "engine": "aaa1111-r0",
+      "appVersion": "0.50.34",
+      "date": "2026-10-03",
+      "verdictReports": 1
+    }
+  },
+  "broken": {
+    "overall": null,
+    "forDevice": null,
+    "verdict": null,
+    "earlier": {
+      "reports": 1,
+      "verdict": "broken",
+      "engine": "aaa1111-r0",
+      "appVersion": "0.50.34",
+      "date": "2026-10-03",
+      "verdictReports": 1
+    }
+  },
+  "current": {
+    "overall": {
+      "verdict": "broken",
+      "reports": 1,
+      "confidence": "low"
+    },
+    "forDevice": null,
+    "verdict": "broken",
+    "earlier": {
+      "reports": 1,
+      "verdict": "great",
+      "engine": "aaa1111-r0",
+      "appVersion": "0.50.34",
+      "date": "2026-10-03",
+      "verdictReports": 1
+    }
+  }
+}

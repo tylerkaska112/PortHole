@@ -1,0 +1,14 @@
+# 0034 - two more 32-bit guest-window slots (and UplayService allowed again)
+
+**Problem.** A 32-bit process needs one 4 GB guest window; the spill band [0x74,0x7b) x 4 GB gave only 7 (0x72, 0x73, 0x75-0x79). `[wow-window]` rejected 0x74 ("the 4GB range is not free (OCCUPIED 0x73ffff0000+0x14000 prot=0/7)": the guard page slot 0x73 owns reaches 16 KB into 0x74's range) and 0x7a ("4GB+guard unavailable and the page at 0x7b00000000 is not an inaccessible neighbour (FREE ...)": the guard would lie past IOS_WOW_SPILL_TOP). Ubisoft Connect (launcher, upc.exe, gpu, network, storage, 2-3 renderers, UplayService) wants 9: the page renderer failed with `guest window reserve returned 0xc0000017` (blank white window); refusing the UplayService helpers (0.50.68) to free slots left the client at "Preparing to launch your game" for ever.
+
+**Change.** `build/ntdll-unix/virtual_ios.c`: (1) `ios_wow_leading_none()`: a PROT_NONE region that straddles the start of the candidate (a guard of the previous slot, at most 0x20000 bytes) counts as the window's own first page (guest page 0 is never used, IOS_WOW_GUEST_FLOOR) and the window is mapped from where it ends; (2) in the spill walk a window whose guard would fall past the top is accepted when the next page is an unmapped hole (it faults like a guard); (3) `IOS_WOW_MAX_WINDOWS` 8 -> 12. `MADEIRA_WOW_EXTRA_SLOTS=0` turns (1) and (2) off. Log: `[wow-window] 0034: B=... starts inside a PROT_NONE guard region`.
+`build/ntdll-unix/process_ios.c`: only the two one-shot UplayService modes (`-uplayservice_perform_updates`, `-uplayservice_set_app_user_model_id`) are refused (0.50.68 also matched the service itself, `-uplayservice_pipe_path` only); `MADEIRA_UPC_SKIP_SERVICE=0` starts them.
+
+**Rebuild.** `tools/rebuild_ntdll_object.sh virtual process`.
+
+**Risk.** A 32-bit guest that dereferences NULL in a window whose first page came from the previous slot's guard sees PROT_NONE (still faults). Unguarded slot 0x7a: an overflow of at most 8 bytes past the window hits an unmapped hole (faults). Untested on a device.
+
+**0.50.70 result and 0.50.71.** The 0x7a slot worked (the launcher took it), slot 0x74 was never tried: `[wow-window] refused: map too small (11724 MB free VA; a window needs 4096 MB plus MADEIRA_WOW_MIN_FREE_GB=8 left over)`, the free-address-space rule that protects the 64-bit game (free VA falls as the game allocates: 11.7, 10.9, 10.7 GB). The default is now 6 when the extra slots are on (`MADEIRA_WOW_MIN_FREE_GB` overrides). The two one-shot service runs each held a slot and a core and never exited; refusing just those leaves the room for the service itself.
+
+Ubisoft's own `launcher_log.txt` (`Program Files (x86)/Ubisoft/Ubisoft Game Launcher/logs`) shows how far the client gets: logs in by Steam ticket, `GameStartPipe: Accepted connection. Starting game session.`, then `PlayGame.cpp (1604) Gamestarter must be initialized before game can be launched.` and nothing more.

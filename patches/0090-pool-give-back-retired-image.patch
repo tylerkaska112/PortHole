@@ -1,0 +1,78 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -11255,12 +11255,50 @@
+         if (enabled) dprintf( 2, "[jit-image-retire] enabled\n" );
+     }
+     return enabled;
++}
++
++/* Porthole 0090: the pool copy of an image its own process has just unmapped goes onto the freelist (3 s grace, as for a dying process) instead of staying in
++ * the ledger until the process exits. Programs that map an image, find its preferred base taken and map it again (Social-Club-Setup.exe is 125 MB, Launcher.exe 32 MB)
++ * left every attempt in the pool. Only a ledger entry that starts exactly at the copy, belongs to this process and holds no other live mapping or FEX code buffer is given back.
++ * Called with ios_pool_lock held. Returns the bytes handed to the freelist. */
++static size_t ios_pool_give_back_copy( char *jit_base, void *peb )
++{
++    char *rx_base = (char *)ios_jit_rx_base_global;
++    size_t off, size = 0;
++    int i, j;
++
++    if (!rx_base || jit_base < rx_base) return 0;
++    off = (size_t)(jit_base - rx_base);
++    for (i = 0; i < ios_pool_ledger_count; i++)
++        if (ios_pool_ledger[i].off == off && ios_pool_ledger[i].peb == peb) break;
++    if (i == ios_pool_ledger_count) return 0;
++    size = ios_pool_ledger[i].size;
++    for (j = 0; j < ios_jit_mapping_count; j++)
++    {
++        char *jb = (char *)ios_jit_mappings[j].jit_base;
++        if (ios_jit_mappings[j].pe_base && ios_jit_mappings[j].size && jb >= rx_base + off && jb < rx_base + off + size) return 0;
++    }
++    for (j = 0; j < ios_jit_anon_alias_count; j++)
++    {
++        uintptr_t rx = ios_jit_anon_aliases[j].jit_rx_alias;
++        if (ios_jit_anon_aliases[j].user_va && rx >= (uintptr_t)(rx_base + off) && rx < (uintptr_t)(rx_base + off + size)) return 0;
++    }
++    if (ios_pool_free_count >= IOS_POOL_FREE_MAX) return 0;
++    if (arm64ec_view) clear_arm64ec_range( rx_base + off, size );
++    ios_pool_freelist[ios_pool_free_count].off = off;
++    ios_pool_freelist[ios_pool_free_count].size = size;
++    ios_pool_freelist[ios_pool_free_count].freed_at = time( NULL );
++    ios_pool_freelist[ios_pool_free_count].advised = 0;
++    ios_pool_free_count++;
++    ios_pool_ledger[i] = ios_pool_ledger[--ios_pool_ledger_count];
++    return size;
+ }
+ 
+ static void ios_jit_retire_image( void *base, size_t size )
+ {
+     uintptr_t start = (uintptr_t)base;
+     int i, retired = 0;
++    size_t freed = 0;
+     static unsigned int reports;
+ 
+     if (!size) return;
+@@ -11272,12 +11310,20 @@
+         if (!mapped || !length) continue;
+         /* Subtraction avoids overflowing either end of an address interval. */
+         if (mapped >= start ? mapped - start >= size : start - mapped >= length) continue;
+-        ios_jit_mappings[i].size = 0;
+-        __sync_synchronize();
+-        ios_jit_mappings[i].pe_base = NULL;
+-        retired++;
++        {
++            char *jb = (char *)ios_jit_mappings[i].jit_base;
++            void *mapper = ios_jit_mappings[i].map_peb;
++            ios_jit_mappings[i].size = 0;
++            __sync_synchronize();
++            ios_jit_mappings[i].pe_base = NULL;
++            retired++;
++            if (mapper && mapper == ios_jit_current_peb()) freed += ios_pool_give_back_copy( jb, mapper );
++        }
+     }
+     pthread_mutex_unlock( &ios_pool_lock );
++    if (freed)
++        dprintf( 2, "[jit-image-retire] 0090 gave back 0x%lx bytes of pool (the copy of %p+%#lx) for reuse after the grace period\n",
++                 (unsigned long)freed, base, (unsigned long)size );
+     if (retired && __atomic_fetch_add( &reports, 1, __ATOMIC_RELAXED ) < 32)
+         dprintf( 2, "[jit-image-retire] unmapped=%p size=%#lx translations=%d\n",
+                  base, (unsigned long)size, retired );

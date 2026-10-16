@@ -1,0 +1,52 @@
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -1496,6 +1496,41 @@
+     close( fd );
+     dprintf( 2, "[jit-dump] ml1242 %s: wrote %zu of %zu pool bytes to %s (untouched pages left as holes)\n",
+              why, written, total, path );
++}
++
++/* Porthole 0044 (diagnostic): the three PEB module lists as the guest sees them (Black Ops 3 walks them to find ntdll and kernelbase). */
++static uint64_t ios_rd64( uint64_t addr )
++{
++    uint64_t v = 0;
++    mach_vm_size_t got = 0;
++    if (addr < 0x10000 || addr >= 0xfffffff000000000ULL) return 0;
++    if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)addr, 8, (mach_vm_address_t)&v, &got ) != KERN_SUCCESS || got != 8) return 0;
++    return v;
++}
++
++static void ios_dump_peb_lists( uint64_t teb )
++{
++    static const struct { const char *name; unsigned list_off, link_off; } lists[] =
++        { { "InLoadOrder", 0x10, 0x00 }, { "InMemoryOrder", 0x20, 0x10 }, { "InInitOrder", 0x30, 0x20 } };
++    uint64_t peb = ios_rd64( teb + 0x60 ), ldr = ios_rd64( peb + 0x18 );
++    unsigned l, n;
++
++    dprintf( STDERR_FILENO, "[peb-lists] teb=%llx peb=%llx ldr=%llx\n", (unsigned long long)teb, (unsigned long long)peb, (unsigned long long)ldr );
++    if (!ldr) return;
++    for (l = 0; l < 3; l++)
++    {
++        uint64_t head = ldr + lists[l].list_off, e = ios_rd64( head );
++        for (n = 0; e && e != head && n < 64; n++, e = ios_rd64( e ))
++        {
++            uint64_t entry = e - lists[l].link_off, base = ios_rd64( entry + 0x30 );
++            uint64_t len = ios_rd64( entry + 0x58 ) & 0xffff, buf = ios_rd64( entry + 0x60 );
++            char nm[48];
++            unsigned i;
++            for (i = 0; i < 47 && i * 2 < len; i++) { uint64_t w = ios_rd64( buf + i * 2 ); nm[i] = (w & 0xff) >= 32 && (w & 0xff) < 127 ? (char)(w & 0xff) : '?'; }
++            nm[i] = 0;
++            dprintf( STDERR_FILENO, "[peb-lists] %s #%u base=%llx %s\n", lists[l].name, n, (unsigned long long)base, nm );
++        }
++    }
+ }
+ 
+ /* Porthole 0039 (diagnostic): hex of guest code around an address, read with mach_vm_read_overwrite (cannot fault). Black Ops 3
+@@ -5643,6 +5678,7 @@
+                             (unsigned long long)live_r12, (unsigned long long)live_r13,
+                             (unsigned long long)live_r14, (unsigned long long)live_r15,
+                             (unsigned long long)state_rip, (unsigned long long)state_cret);
++                        { static int peb_done; if (!peb_done && teb_out) { peb_done = 1; ios_dump_peb_lists( (uint64_t)teb_out ); } }
+ 
+                         if (live_rsp >= 0x10000 && live_rsp < 0xfffffff000000000ULL)
+                         {

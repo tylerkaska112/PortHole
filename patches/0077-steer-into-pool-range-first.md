@@ -1,0 +1,8 @@
+# 0077 steered reserves go to the spare pool range first in a Dock session
+
+`virtual_ios.c` (the steering block of `NtAllocateVirtualMemory`). The guest's 512 MB per-thread reservations (Valve's client threads and the game's own: `[steer] #N size=0x1ffff000 ...`) are "steered" above the guest band. Until now they went to `ios_steer_slot` = 0x7C00000000 (the emulator's own 16 GB band) first and spilled to [0x7400000000, 0x7800000000) only when that was full (ml171). The emulator's per-thread state, call-return stacks and code metadata live in the same 0x7C band.
+
+Rust through Steam (0.50.128, 2026-10-06, swap 4 GB wide, texture and shadow settings lowered so memory was fine at 2.5 GB): after about 6 minutes `[steer] #20 ... reserved_total=9727MB`, then `[va-scan] FAILED window=0x7c00000000..0x8000000000`, `[TI-IC] THREADSTATE ALLOC FAILED: 12288 bytes ... the emulator address band is exhausted; refusing to start this thread`, `[alloc-fail] ml798 FEXAlloc could not allocate bytes=0x2000 ... band=0x7c00000000..0x7fffffffff`, and an illegal instruction in the translated code (`ILL at pc=0x1469151cc`, status c000001d), which ended the game process. `fex-jit-dump.bin` (the 512 MB pool dump the ILL handler writes) is left in Documents.
+
+With `MADEIRA_CAGE_RELEASE=1` (set for a Dock session: no Chromium, so its pool range [0x7400000000, 0x7c00000000) is unused) steered reserves now try that range first (32 GB) and the emulator band is kept for the emulator; the old order is the fallback. `MADEIRA_STEER_PA_FIRST=0` turns it off. Without the cage switch (every direct start) nothing changes. Logs `[steer] 0077 ...` once.
+Not verified on a device.

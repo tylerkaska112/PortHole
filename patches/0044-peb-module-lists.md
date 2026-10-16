@@ -1,0 +1,3 @@
+# 0044 - the PEB module lists at a fault (diagnostic)
+
+Black Ops 3 reads files `C:\windows\system32\ntdll.dll`, `C:\windows\sysx64\winemetal.dll` ... (its stack shows the paths) and walks the export tables of the module it believes is ntdll, but the module whose export names it scans (RDI = 1426 = NumberOfNames) is kernelbase. Windows' module lists start with the exe, ntdll, kernel32, kernelbase (init order: ntdll, kernelbase, kernel32); if ours differ, a loader that takes "the second entry" gets the wrong module. `signal_arm64_ios.c`: once per run, `[peb-lists] <list> #n base=<addr> <name>` for InLoadOrder, InMemoryOrder and InInitOrder at the first unhandled fault. Logging only.

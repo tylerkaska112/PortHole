@@ -1,0 +1,149 @@
+diff --git a/build/ntdll-unix/ios_reloc_index.h b/build/ntdll-unix/ios_reloc_index.h
+new file mode 100644
+index 0000000..1b240ff
+--- /dev/null
++++ b/build/ntdll-unix/ios_reloc_index.h
+@@ -0,0 +1,109 @@
++/* Porthole patch 0020: find the part of a PE relocation table that covers a region, without walking the whole table.
++ *
++ * The "iOS JIT IAT sync" in NtProtectVirtualMemory (virtual_ios.c) re-applies an image's DIR64 relocations over the bytes it has just copied. It used to walk the ENTIRE
++ * relocation table of the image, twice, for every protection change. A game that changes protections page by page (copy protection unpacking itself) does that tens of
++ * thousands of times, and a big image has a big table: Far Cry 6's FC_m64d3d12.dll is 534 MB, its table walk took about 90 ms, and the game stayed at 100% CPU for hours.
++ *
++ * A relocation table is a list of blocks, one per 4 KB page of the image, in ascending page order. The first use of a table builds an index of the blocks (page address and
++ * position); after that a region's blocks are found by binary search and the callers walk only those, with the walking code they already had. A table that is not in
++ * ascending order (never produced by a linker, but not impossible) is not indexed and gets the old full walk.
++ *
++ * Self-contained so it can be tested on the host: app/Tests/Engine/reloc_index_test.c includes this file. */
++#ifndef IOS_RELOC_INDEX_H
++#define IOS_RELOC_INDEX_H
++#include <pthread.h>
++#include <stddef.h>
++#include <stdlib.h>
++
++struct ios_reloc_index
++{
++    const char *table;      /* where the table is (the image's RW copy), the cache key together with size */
++    unsigned size;          /* bytes the caller says the table has */
++    unsigned valid_end;     /* bytes covered by well-formed blocks (the old loops stop at the first bad one) */
++    unsigned n;             /* number of blocks */
++    unsigned *off;          /* byte position of each block in the table */
++    unsigned *rva;          /* page address (relative to the image) of each block */
++    int sorted;
++};
++
++#define IOS_RELOC_CACHE 8
++static struct ios_reloc_index ios_reloc_cache[IOS_RELOC_CACHE];
++static unsigned ios_reloc_next;
++static pthread_mutex_t ios_reloc_lock = PTHREAD_MUTEX_INITIALIZER;
++
++/* Is a cached index still describing the memory at its table? (A mapping can be freed and another image mapped at the same place.) */
++static int ios_reloc_still_valid( const struct ios_reloc_index *c )
++{
++    unsigned i[3] = { 0, c->n / 2, c->n - 1 }, k;
++    if (!c->n) return 0;
++    for (k = 0; k < 3; k++)
++    {
++        unsigned b = i[k];
++        if ((size_t)c->off[b] + 8 > c->size) return 0;
++        if (*(const unsigned *)(c->table + c->off[b]) != c->rva[b]) return 0;
++    }
++    return 1;
++}
++
++static void ios_reloc_build( struct ios_reloc_index *c, const char *table, unsigned size )
++{
++    unsigned pos = 0, n = 0, k;
++
++    c->table = table; c->size = size; c->n = 0; c->sorted = 0; c->off = NULL; c->rva = NULL; c->valid_end = 0;
++    while ((size_t)pos + 8 <= size)
++    {
++        unsigned bs = *(const unsigned *)(table + pos + 4);
++        if (bs < 8 || (size_t)pos + bs > size) break;
++        n++; pos += bs;
++    }
++    c->valid_end = pos;
++    if (!n) return;
++    c->off = (unsigned *)malloc( n * sizeof(unsigned) );
++    c->rva = (unsigned *)malloc( n * sizeof(unsigned) );
++    if (!c->off || !c->rva) { free( c->off ); free( c->rva ); c->off = c->rva = NULL; return; }
++    for (pos = 0, k = 0; k < n; k++)
++    {
++        c->off[k] = pos;
++        c->rva[k] = *(const unsigned *)(table + pos);
++        pos += *(const unsigned *)(table + pos + 4);
++    }
++    c->n = n;
++    c->sorted = 1;
++    for (k = 1; k < n; k++) if (c->rva[k] < c->rva[k - 1]) { c->sorted = 0; break; }
++}
++
++/* The sub-range [*start, *end) of the table (whole blocks) that can hold a relocation touching [off, off + len) of the image. Returns 0, leaving *start and *end alone, when the
++ * caller should walk the whole table (not indexable). A DIR64 entry is 8 bytes and can start up to 7 bytes before a page boundary, so the block before the first page is included. */
++static int ios_reloc_window( const char *table, unsigned size, size_t off, size_t len, const char **start, const char **end )
++{
++    struct ios_reloc_index *c = NULL;
++    unsigned i, lo, hi, first, last;
++    size_t from = off > 7 ? off - 7 : 0, to = off + len;
++    int ok = 0;
++
++    pthread_mutex_lock( &ios_reloc_lock );
++    for (i = 0; i < IOS_RELOC_CACHE; i++)
++        if (ios_reloc_cache[i].table == table && ios_reloc_cache[i].size == size && (ios_reloc_cache[i].n || !ios_reloc_cache[i].sorted)) { c = &ios_reloc_cache[i]; break; }
++    if (c && c->n && !ios_reloc_still_valid( c )) { free( c->off ); free( c->rva ); c->off = c->rva = NULL; c->n = 0; c->table = NULL; c = NULL; }
++    if (!c)
++    {
++        c = &ios_reloc_cache[ios_reloc_next++ % IOS_RELOC_CACHE];
++        free( c->off ); free( c->rva );
++        ios_reloc_build( c, table, size );
++    }
++    if (c->sorted && c->n)
++    {
++        lo = 0; hi = c->n;
++        while (lo < hi) { unsigned mid = lo + (hi - lo) / 2; if ((size_t)c->rva[mid] + 0x1000 > from) hi = mid; else lo = mid + 1; }
++        first = lo;
++        hi = c->n;
++        while (lo < hi) { unsigned mid = lo + (hi - lo) / 2; if ((size_t)c->rva[mid] >= to) hi = mid; else lo = mid + 1; }
++        last = lo;
++        *start = table + (first < c->n ? c->off[first] : c->valid_end);
++        *end   = table + (last  < c->n ? c->off[last]  : c->valid_end);
++        ok = 1;
++    }
++    pthread_mutex_unlock( &ios_reloc_lock );
++    return ok;
++}
++#endif
+diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+index ee9fa72..27f5645 100644
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -24,6 +24,7 @@
+ 
+ #include "config.h"
+ #include "../madeira_cfg.h"   /* ml1095: one config file */
++#include "ios_reloc_index.h"   /* Porthole patch 0020: find the relocation blocks a region needs without walking the whole table */
+ #include <malloc/malloc.h>
+ 
+ #include <assert.h>
+@@ -24267,6 +24268,10 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T
+                         pthread_mutex_lock( &ios_sync_keep_lock );
+                         keep_locked = 1;
+                         const char *rel_end = rel + ios_jit_mappings[idx].reloc_size;
++                        {   /* Porthole patch 0020: only the blocks that can touch [off, off + size), not the whole table */
++                            const char *ws, *we;
++                            if (ios_reloc_window( rel, ios_jit_mappings[idx].reloc_size, off, size, &ws, &we )) { rel = ws; rel_end = we; }
++                        }
+                         size_t nw = size / 8, k;
+ 
+                         memset( ios_sync_keep, 0, (nw + 7) / 8 );
+@@ -24341,6 +24346,10 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T
+                         size_t rgn_off_end   = off + size;
+                         char *block = rw_image + r_rva;
+                         char *block_end = block + r_sz;
++                        {   /* Porthole patch 0020: likewise for the re-apply walk */
++                            const char *ws, *we;
++                            if (ios_reloc_window( block, r_sz, rgn_off_start, size, &ws, &we )) { block = (char *)ws; block_end = (char *)we; }
++                        }
+                         int dir64_count = 0;
+ 
+                         while (block < block_end)

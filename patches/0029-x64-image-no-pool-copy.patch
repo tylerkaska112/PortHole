@@ -1,0 +1,92 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -11901,9 +11901,77 @@
+ #else
+     return 0;
+ #endif
++}
++
++
++/* Porthole 0029: a PLAIN x64 image (not ARM64EC, not ARM64X) in an ARM64EC session is data to the host, like an i386 image in a
++ * WoW guest window (ml1030, above).
++ *
++ * The emulator decodes x64 bytes from the image's own VA and runs its translation out of the JIT pool; the host never fetches the
++ * image. Making such a page executable used to copy the WHOLE image into the pool and remap it over the original VA, so that the
++ * pool spent a second address range, the size of the image, on a copy nothing runs (ml1245 calls it "a dead copy"). For a big game
++ * that is most of the pool: Far Cry 6's FC_m64d3d12.dll is 534 MB of an 1120 MB pool, which left Ubisoft Connect's helper
++ * processes no room (JIT pool exhausted, `EXEC ALLOC FAILED`).
++ *
++ * Opt-in: MADEIRA_X64_IMAGE_DATA=1 (Settings > Engine). The test is the header, because an ARM64EC image also says 0x8664: a
++ * non-zero CHPEMetadataPointer in the load config marks it hybrid (the same test as ios_jit_mapping_is_hybrid). Anything the
++ * test cannot read stays on the old path. */
++static int ios_x64_image_data_enabled(void)
++{
++    static int cached = -1;
++    if (cached < 0)
++    {
++        const char *e = getenv( "MADEIRA_X64_IMAGE_DATA" );
++        cached = (e && *e == '1');
++    }
++    return cached;
+ }
+ 
++static int ios_x64_image_is_host_data( const void *base, size_t size )
++{
++#ifdef WINE_IOS
++    struct file_view *view;
++    uintptr_t b;
++    unsigned int lfanew = 0, cfg_size = 0;
++    IMAGE_NT_HEADERS64 nt;
++    IMAGE_DATA_DIRECTORY dir;
++    ULONGLONG chpe = 0;
++    static unsigned long n_data, n_hybrid;
+ 
++    if (!ios_x64_image_data_enabled()) return 0;
++    if (!arm64ec_view) return 0;                      /* only an ARM64EC session runs x64 code through the emulator */
++    if (ios_wow_in_window( base )) return 0;          /* i386: ios_guest_image_is_host_data */
++    if (!(view = find_view( base, size ))) return 0;
++    if (!(view->protect & SEC_IMAGE)) return 0;
++    b = (uintptr_t)view->base;
++    if (!ios_safe_read( b + 0x3c, &lfanew, 4 ) || (size_t)lfanew + sizeof(nt) > view->size) return 0;
++    if (!ios_safe_read( b + lfanew, &nt, sizeof(nt) )) return 0;
++    if (nt.Signature != IMAGE_NT_SIGNATURE || nt.FileHeader.Machine != 0x8664 ||
++        nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return 0;
++    if (nt.OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
++    {
++        dir = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
++        if (dir.VirtualAddress && (size_t)dir.VirtualAddress + dir.Size <= view->size &&
++            ios_safe_read( b + dir.VirtualAddress, &cfg_size, 4 ) &&
++            min( dir.Size, cfg_size ) > offsetof( IMAGE_LOAD_CONFIG_DIRECTORY64, CHPEMetadataPointer ) &&
++            ios_safe_read( b + dir.VirtualAddress + offsetof( IMAGE_LOAD_CONFIG_DIRECTORY64, CHPEMetadataPointer ),
++                           &chpe, sizeof(chpe) ) && chpe)
++        {
++            if (++n_hybrid <= 4) dprintf( 2, "[x64-image] 0029 %p+0x%lx is ARM64EC (CHPE metadata): keeps the pool copy\n",
++                                          (void *)b, (unsigned long)view->size );
++            return 0;
++        }
++    }
++    if (++n_data <= 24)
++        dprintf( 2, "[x64-image] 0029 #%lu %p+0x%lx (view 0x%lx) is a plain x64 image: no pool copy, EXEC has no host meaning\n",
++                 n_data, base, (unsigned long)size, (unsigned long)view->size );
++    return 1;
++#else
++    return 0;
++#endif
++}
++
++
+ /* A guest's anonymous RWX data heap is plain read/write memory to the host.
+  *
+  * Some runtimes allocate their data heap PAGE_EXECUTE_READWRITE (Mono's Boehm
+@@ -12043,6 +12111,11 @@
+                      (unix_prot & PROT_WRITE) ? 'w' : '-' );
+         unix_prot &= ~PROT_EXEC;
+         if (!unix_prot) unix_prot = PROT_READ;   /* PAGE_EXECUTE alone: readable is the honest answer */
++    }
++    else if ((unix_prot & PROT_EXEC) && ios_x64_image_is_host_data( base, size ))
++    {
++        unix_prot &= ~PROT_EXEC;
++        if (!unix_prot) unix_prot = PROT_READ;
+     }
+     else if ((unix_prot & PROT_EXEC) && ios_guest_anon_rwx_is_host_data( base, size ))
+     {

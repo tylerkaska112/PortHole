@@ -1,0 +1,62 @@
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -3295,6 +3295,7 @@
+   return (e && *e) ? (float)atof(e) : dflt;
+ }
+ 
++
+ static const char *g_fg_msl =
+   "#include <metal_stdlib>\n"
+   "using namespace metal;\n"
+@@ -3459,7 +3460,24 @@
+   dprintf(STDERR_FILENO, "[framegen] needs iOS 26 -- off\n");
+   g_fg.dead = 1;
+   return 0;
++}
++
++/* 0136: frame generation can be switched on and off while the game runs (the in-game menu). The layer has to hand out drawables that can be read, so the layer's
++ * framebufferOnly flag follows the switch (kept from setProps); a frame whose drawable still comes from before the change is presented as it is. */
++static CAMetalLayer *g_fg_layer;
++static int g_fg_orig_fbo = 1;
++void madeira_framegen_set(int on, double hz) {
++  g_fg_on = on ? 1 : 0;
++  if (hz > 0) g_fg.hz = hz;
++  g_fg.have_prev = 0; g_fg.last_abs = 0; g_fg.dt = 0; g_fg.stat_abs = 0;
++  dprintf(STDERR_FILENO, "[framegen] %s from the app (screen %.0f Hz)\n", on ? "ON" : "OFF", hz > 0 ? hz : 0.0);
++  if (g_fg_layer) {
++    CAMetalLayer *l = g_fg_layer;
++    int fbo = on ? 0 : g_fg_orig_fbo;
++    dispatch_async(dispatch_get_main_queue(), ^{ l.framebufferOnly = fbo ? YES : NO; });
++  }
+ }
++int madeira_framegen_get(void) { return madeira_fg_enabled() && !g_fg.dead; }
+ 
+ static void madeira_fg_dispatch(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> p, NSUInteger w, NSUInteger h) {
+   [enc setComputePipelineState:p];
+@@ -3513,7 +3531,7 @@
+     g_fg.dt = g_fg.dt > 0 ? g_fg.dt * 0.8 + d * 0.2 : d;
+   }
+   g_fg.last_abs = now;
+-  if (!src || !madeira_fg_setup(dev, src)) return 0;
++  if (!src || ((CAMetalLayer *)drawable.layer).framebufferOnly || !madeira_fg_setup(dev, src)) return 0;   /* 0136: a drawable from before the switch cannot be read */
+   if (g_fg.hz == 0) { float h = madeira_fg_envf("MADEIRA_FRAMEGEN_HZ", 0.0f); g_fg.hz = h > 0 ? h : -1.0; }   /* -1: asked, not known */
+ 
+   ni = g_fg.cur ^ 1;
+@@ -3647,6 +3665,8 @@
+   /* ml1050: this call IS the frame boundary on the encode thread. */
+   if (madeira_frame_hooks_on())
+     ios_frame_encode_present(0);
++  /* 0136: switched off from the menu: give the history and interpolator textures back (here, on the encode thread, where they are used). */
++  if (!madeira_fg_enabled() && g_fg.interp) madeira_fg_release();
+   /* Frame generation presents both frames itself (madeira_fg_present). */
+   if (mode != 2 && madeira_fg_enabled() &&
+       madeira_fg_present((id<MTLCommandBuffer>)params->handle, (id<CAMetalDrawable>)params->arg)) {
+@@ -4089,6 +4109,8 @@
+     layer.device = (id<MTLDevice>)props->device;
+     layer.opaque = props->opaque;
+     layer.framebufferOnly = madeira_fg_enabled() ? NO : props->framebuffer_only;   /* frame generation reads the drawable */
++    if (layer != g_fg_layer) { [g_fg_layer release]; g_fg_layer = [layer retain]; }
++    g_fg_orig_fbo = props->framebuffer_only;
+     layer.contentsScale = props->contents_scale;
+ #if !TARGET_OS_IOS
+     layer.displaySyncEnabled = props->display_sync_enabled;

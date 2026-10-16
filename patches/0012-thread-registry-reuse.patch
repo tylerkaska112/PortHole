@@ -1,0 +1,79 @@
+diff --git a/build/ntdll-unix/signal_arm64_ios.c b/build/ntdll-unix/signal_arm64_ios.c
+index c12eba5..0ad55dc 100644
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -576,8 +576,10 @@ uintptr_t ios_thread_registry_teb(int i)
+ 
+ thread_t ios_thread_registry_mach(int i)
+ {
++    thread_t t;
+     if (i < 0 || i >= IOS_MAX_WINE_THREADS) return 0;
+-    return ios_thread_registry[i].mach_thread;
++    t = ios_thread_registry[i].mach_thread;
++    return t == (thread_t)0xFFFFFFFFu ? 0 : t;      /* Porthole 0012: a slot being handed to a new thread has no port yet */
+ }
+ 
+ static int ios_thread_is_registered(thread_t mach_thread)
+@@ -653,6 +655,52 @@ int ios_thread_registry_range_busy( uintptr_t base, uintptr_t size )
+     return 0;
+ }
+ 
++/* Porthole 0012: hand out the slot of a thread that no longer exists.
++ *
++ * The registry is append-only: a slot is only cleared when a whole guest window is released (purge_range above). A game that starts and stops
++ * short-lived threads (The Forest: ~2000 audio and worker threads in four minutes) therefore fills all IOS_MAX_WINE_THREADS slots, and every later
++ * thread "resolves to the slot-0 TEB (wrong process!)". Only called when the table is already full, i.e. when the old behaviour was already broken, so a
++ * run that never fills the table is unchanged.
++ *
++ * An entry is reusable when its Mach thread is gone (same liveness test as ios_thread_registry_range_busy) or when the purge left it empty. The slot is
++ * claimed with a compare-and-swap to a value no thread port can have, so two threads registering at once never get the same slot; the caller fills in the
++ * TEB and trampoline and stores its own port last, exactly as for a fresh slot. The extra send rights taken at registration are given back.
++ * Returns the slot, or -1 if every registered thread is still alive. */
++#define IOS_REG_CLAIMED ((thread_t)0xFFFFFFFFu)
++static int ios_thread_registry_reclaim( void )
++{
++    static volatile int32_t reclaimed;
++    int i;
++
++    for (i = 0; i < IOS_MAX_WINE_THREADS; i++)
++    {
++        thread_t old = ios_thread_registry[i].mach_thread;
++
++        if (old == IOS_REG_CLAIMED) continue;                 /* another thread is registering into it right now */
++        if (old)
++        {
++            struct thread_basic_info info;
++            mach_msg_type_number_t length = THREAD_BASIC_INFO_COUNT;
++            kern_return_t kr = thread_info( old, THREAD_BASIC_INFO, (thread_info_t)&info, &length );
++
++            if (kr != KERN_INVALID_ARGUMENT && kr != MACH_SEND_INVALID_DEST && kr != KERN_TERMINATED) continue;   /* still alive */
++        }
++        else if (ios_thread_registry[i].teb) continue;        /* a fresh registration is being written */
++
++        if (!__sync_bool_compare_and_swap( &ios_thread_registry[i].mach_thread, old, IOS_REG_CLAIMED )) continue;
++        ios_thread_registry[i].teb = 0;
++        ios_thread_registry[i].trampoline = NULL;
++        if (old) mach_port_mod_refs( mach_task_self(), old, MACH_PORT_RIGHT_SEND, -4 );
++        {
++            int n = __sync_add_and_fetch( &reclaimed, 1 );
++            if (n <= 10 || (n % 500) == 0)
++                ERR("[thread-registry] porthole-0012: reused slot %d of an exited thread (port 0x%x), %d reuses so far\n", i, (unsigned)old, n);
++        }
++        return i;
++    }
++    return -1;
++}
++
+ static int ios_lookup_thread(thread_t mach_thread, uintptr_t *teb_out, void **tramp_out)
+ {
+     int count = __sync_fetch_and_add(&ios_thread_count, 0);
+@@ -5894,7 +5942,8 @@ static void ios_setup_mach_exception_handler( thread_t pe_thread, uintptr_t teb,
+     if (idx == reg_count)
+     {
+         idx = __sync_fetch_and_add(&ios_thread_count, 1);
+-        if (idx >= IOS_MAX_WINE_THREADS)
++        if (idx >= IOS_MAX_WINE_THREADS) idx = ios_thread_registry_reclaim();   /* Porthole 0012: reuse the slot of an exited thread */
++        if (idx < 0)
+         {
+             ERR("[thread-registry] FULL (%d slots) — thread 0x%x teb=%p NOT registered; "
+                 "Mach events on it will resolve to the slot-0 TEB (wrong process!)\n",

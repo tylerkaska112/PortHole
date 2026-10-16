@@ -1,0 +1,147 @@
+diff --git a/dlls/wow64/system.c b/dlls/wow64/system.c
+index 94286160..e59f2c6a 100644
+--- a/dlls/wow64/system.c
++++ b/dlls/wow64/system.c
+@@ -725,6 +725,25 @@ NTSTATUS WINAPI wow64_NtRaiseHardError( UINT *args )
+     HARDERROR_RESPONSE *response = get_ptr( &args );
+ 
+     FIXME( "%08lx %lu %lx %p %u %p: stub\n", status, count, params_mask, params, option, response );
++    /* Porthole 0024 (diagnostic): say what the program reported. Each parameter is a 32-bit value; the ones the mask marks
++     * point at a 32-bit UNICODE_STRING (Length, MaximumLength, Buffer). Ubisoft Connect's client raises one of these (a
++     * status of its own) right before it ends itself with exit code 0xdeadc0de, and the stub printed no text. */
++    if (params && count <= 8)
++    {
++        ULONG i;
++        for (i = 0; i < count; i++)
++        {
++            if (params_mask & (1u << i))
++            {
++                USHORT *us = guest_ptr32( params[i] );
++                if (us && us[0] && us[0] < 2048 && us[0] % 2 == 0)
++                    FIXME( "hard error param %lu: L\"%.*ls\"\n", i, (int)(us[0] / 2), (WCHAR *)guest_ptr32( *(ULONG *)(us + 2) ));
++                else
++                    FIXME( "hard error param %lu: unreadable string at %08x\n", i, (unsigned)params[i] );
++            }
++            else FIXME( "hard error param %lu: %08x\n", i, (unsigned)params[i] );
++        }
++    }
+     return STATUS_NOT_IMPLEMENTED;
+ }
+ 
+diff --git a/dlls/wow64/virtual.c b/dlls/wow64/virtual.c
+index 2a2fe1cf..1d79d32e 100644
+--- a/dlls/wow64/virtual.c
++++ b/dlls/wow64/virtual.c
+@@ -581,7 +581,16 @@ NTSTATUS WINAPI wow64_NtProtectVirtualMemory( UINT *args )
+                                                       addr, size, 2, new_prot, 0 );
+     else if (pBTCpuNotifyMemoryProtect) pBTCpuNotifyMemoryProtect( addr, size, new_prot, FALSE, 0 );
+ 
+-    status = NtProtectVirtualMemory( process, &addr, &size, new_prot, old_prot );
++    {   /* Porthole 0026 (diagnostic): the arguments, and the result, for system-DLL-range addresses */
++        ULONG dbg_addr = *addr32, dbg_size = *size32;
++        status = NtProtectVirtualMemory( process, &addr, &size, new_prot, old_prot );
++        if (is_current && dbg_addr >= 0x70000000)
++        {
++            static unsigned n;
++            if (n++ < 300) FIXME( "[wow-vm] protect %08x size %x prot %x -> %08x (old %x)\n", dbg_addr, dbg_size, (unsigned)new_prot,
++                                  (unsigned)status, status || !old_prot ? 0 : (unsigned)*old_prot );
++        }
++    }
+ 
+     if (!is_current) send_cross_process_notification( process, CrossProcessPostVirtualProtect,
+                                                       addr, size, 2, new_prot, status );
+@@ -657,6 +666,14 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
+                     info32->RegionSize = highest_user_address - info32->BaseAddress + 1;
+             }
+         }
++        if (addr_guest >= 0x70000000 && !status)
++        {
++            static unsigned n;
++            MEMORY_BASIC_INFORMATION32 *q = ptr;
++            if (n++ < 300) FIXME( "[wow-vm] query %08x -> base %08x alloc %08x size %x state %x protect %x type %x\n", addr_guest,
++                                  (unsigned)q->BaseAddress, (unsigned)q->AllocationBase, (unsigned)q->RegionSize,
++                                  (unsigned)q->State, (unsigned)q->Protect, (unsigned)q->Type );
++        }
+         res_len = sizeof(MEMORY_BASIC_INFORMATION32);
+         break;
+ 
+@@ -987,8 +1004,78 @@ NTSTATUS WINAPI wow64_NtWriteVirtualMemory( UINT *args )
+ 
+     /* addr is in the target, buffer is ours — the same
+      * split wow64_NtReadVirtualMemory already handles (target-window rule, wow64_private.h). */
++    ULONG dbg_addr = host_ptr32( addr );
++    BOOL dbg_self = FALSE;
+     addr = retarget_ptr( wow_guest_base_for_process( process ), addr );
+-    status = NtWriteVirtualMemory( process, addr, buffer, size, &ret_size );
++    /* Porthole 0027: a write into the CALLING process (WriteProcessMemory on itself, which inline hookers use) goes straight to
++     * memory. Wine sends every NtWriteVirtualMemory to the server, and on this port the server cannot write into the app's own
++     * memory: it answered STATUS_ACCESS_DENIED to all 58 hooks the Ubisoft Connect launcher tried on the system DLLs, which
++     * then stopped with "Error at hooking API". The page must already be writable (as Windows requires of a non-debugger),
++     * and the emulator is told afterwards that the code there changed. Anything else keeps the server path. */
++    {
++        PROCESS_BASIC_INFORMATION pbi;
++        if (RtlIsCurrentProcess( process )) dbg_self = TRUE;
++        else if (!NtQueryInformationProcess( process, ProcessBasicInformation, &pbi, sizeof(pbi), NULL ))
++            dbg_self = pbi.UniqueProcessId == (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess;
++    }
++    if (dbg_self && size)
++    {
++        SIZE_T done = 0;
++        BYTE *dst = addr;
++        const BYTE *src = buffer;
++
++        status = STATUS_SUCCESS;
++        while (done < size)
++        {
++            MEMORY_BASIC_INFORMATION info;
++            SIZE_T n;
++
++            ULONG restore = 0, junk;
++            void *pa;
++            SIZE_T ps;
++
++            if (NtQueryVirtualMemory( NtCurrentProcess(), dst + done, MemoryBasicInformation, &info, sizeof(info), NULL ) ||
++                info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !info.Protect)
++            {
++                status = done ? STATUS_PARTIAL_COPY : STATUS_ACCESS_VIOLATION;
++                break;
++            }
++            n = min( size - done, (SIZE_T)((BYTE *)info.BaseAddress + info.RegionSize - (dst + done)) );
++            if (!(info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
++            {
++                /* Windows' WriteProcessMemory makes a read-only or execute-only page writable for the write and puts the
++                 * protection back; the hooker above relies on it (a write at ntdll+0x4ee90 failed with STATUS_ACCESS_VIOLATION
++                 * without this). Same notifications as wow64_NtProtectVirtualMemory. */
++                ULONG want = (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ)) ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
++                pa = dst + done; ps = n;
++                if (pBTCpuNotifyMemoryProtect) pBTCpuNotifyMemoryProtect( pa, ps, want, FALSE, 0 );
++                status = NtProtectVirtualMemory( NtCurrentProcess(), &pa, &ps, want, &restore );
++                if (pBTCpuNotifyMemoryProtect) pBTCpuNotifyMemoryProtect( pa, ps, want, TRUE, status );
++                if (status) { status = done ? STATUS_PARTIAL_COPY : STATUS_ACCESS_VIOLATION; restore = 0; break; }
++                status = STATUS_SUCCESS;
++            }
++            memcpy( dst + done, src + done, n );
++            if (restore)
++            {
++                pa = dst + done; ps = n;
++                if (pBTCpuNotifyMemoryProtect) pBTCpuNotifyMemoryProtect( pa, ps, restore, FALSE, 0 );
++                NtProtectVirtualMemory( NtCurrentProcess(), &pa, &ps, restore, &junk );
++                if (pBTCpuNotifyMemoryProtect) pBTCpuNotifyMemoryProtect( pa, ps, restore, TRUE, 0 );
++            }
++            done += n;
++        }
++        ret_size = done;
++        if (done && pBTCpuNotifyMemoryDirty) pBTCpuNotifyMemoryDirty( dst, done );
++    }
++    else status = NtWriteVirtualMemory( process, addr, buffer, size, &ret_size );
++    if (dbg_addr >= 0x70000000)
++    {
++        static unsigned n;
++        if (n++ < 300) FIXME( "[wow-vm] write%s %08x size %lx bytes %02x %02x %02x %02x %02x -> %08x\n", dbg_self ? "(self)" : "", dbg_addr, (unsigned long)size,
++                              size > 0 ? ((const BYTE *)buffer)[0] : 0, size > 1 ? ((const BYTE *)buffer)[1] : 0,
++                              size > 2 ? ((const BYTE *)buffer)[2] : 0, size > 3 ? ((const BYTE *)buffer)[3] : 0,
++                              size > 4 ? ((const BYTE *)buffer)[4] : 0, (unsigned)status );
++    }
+     put_size( retlen, ret_size );
+     return status;
+ }

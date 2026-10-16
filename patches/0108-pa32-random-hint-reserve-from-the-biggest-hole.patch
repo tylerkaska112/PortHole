@@ -1,0 +1,76 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-11 22:30:47
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-11 22:30:47
+@@ -1511,7 +1511,58 @@
+              pick, (unsigned long long)IOS_CAGE_REAL_SIZE, (unsigned)st );
+     return st;
+ }
++
++/* Porthole 0108 (opt-in, with 0105): a 16GB reserve at a RANDOM hint (not PartitionAlloc's boundary-minus-64KB guard layout) wants any free address; the caller
++ * only uses the pointer it gets back. The ordinary jumbo path fails it (the map holds no free 16GB), and the soft-slot fallback then returned a slot-relative
++ * address such as 0x7557090000 inside the emulator's band, the cage holdback and the real pool, where the first commit failed and Chromium took an int3
++ * (RDR2 launcher, 2026-10-11). Here the range is granted where the map has its biggest hole: the first part (up to 4GB) is a REAL reserved view, so commits
++ * work through the normal path, and the rest is recorded soft (committed on demand if still free). The guest is told it got the whole size. */
++static NTSTATUS ios_pa32_soft_back( SIZE_T req, ULONG type, ULONG protect, void **ret )
++{
++    mach_vm_address_t a = 0x100000000ULL, best = 0;
++    mach_vm_size_t best_sz = 0;
++    unsigned guard = 0;
++    SIZE_T back, csz;
++    void *pick;
++    NTSTATUS st;
+ 
++    while (a < 0x8000000000ULL && guard++ < 400000)
++    {
++        mach_vm_address_t r = a;
++        mach_vm_size_t s = 0;
++        vm_region_basic_info_data_64_t info;
++        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
++        mach_port_t obj = MACH_PORT_NULL;
++        kern_return_t kr = mach_vm_region( mach_task_self(), &r, &s, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj );
++        uint64_t gap_end = (kr == KERN_SUCCESS) ? (uint64_t)r : 0x8000000000ULL;
++        if (gap_end > a && gap_end - a > best_sz) { best = a; best_sz = gap_end - a; }
++        if (kr != KERN_SUCCESS) break;
++        a = r + s;
++    }
++    if (best_sz < 0x80020000ULL) return STATUS_NO_MEMORY;                    /* wants a hole of at least 2GB */
++    back = (SIZE_T)(best_sz - 0x20000);
++    if (back > 0x100000000ULL) back = 0x100000000ULL;                        /* up to 4GB real */
++    back &= ~(SIZE_T)0xffff;
++    pick = (void *)(uintptr_t)((best + 0x10000) & ~(mach_vm_address_t)0xffff);
++    csz = back;
++    st = allocate_virtual_memory( &pick, &csz, type, protect, 0, 0, 0, 0 );
++    dprintf( 2, "[pa32] patch0108 random-hint 0x%llx ask: hole 0x%llx+0x%llx, %zu MB real at %p st=0x%x\n",
++             (unsigned long long)req, (unsigned long long)best, (unsigned long long)best_sz, (size_t)(csz >> 20), pick, (unsigned)st );
++    if (st) return st;
++    *ret = pick;
++    if (ios_soft_n < IOS_SOFT_MAX && req > csz)
++    {
++        ios_soft[ios_soft_n].base = (uint64_t)(uintptr_t)pick + csz;
++        ios_soft[ios_soft_n].size = req - csz;
++        ios_soft[ios_soft_n].committed = 0;
++        ios_soft[ios_soft_n].commits = 0;
++        ios_soft[ios_soft_n].collisions = 0;
++        ios_soft[ios_soft_n].cage = 0;
++        ios_soft_n++;
++    }
++    return STATUS_SUCCESS;
++}
++
+ static void ios_jumbo_census( void *hint, size_t size, void *result, unsigned st )
+ {
+     /* ml131: report the 512MB-reservation census alongside every jumbo call —
+@@ -23746,7 +23797,13 @@
+                      * page is a deliberate forbidden zone PA never commits, so it
+                      * costs nothing that it may be unmappable. */
+                     uint64_t slot;
+-                    for (slot = 0x7000000000ULL; slot < 0x8000000000ULL; slot += align_unit)
++                    /* 0108: a random-hint 16GB ask (not the guard layout) is served from the map's biggest hole, with its first part real */
++                    if (ios_pa32_soft_enabled() && *size_ptr < 0x800000000ULL && off && off < align_unit - 0x100000)
++                    {
++                        void *pb = NULL;
++                        if (ios_pa32_soft_back( *size_ptr, type, protect, &pb ) == STATUS_SUCCESS) { *ret = pb; st = STATUS_SUCCESS; }
++                    }
++                    for (slot = 0x7000000000ULL; slot < 0x8000000000ULL && st; slot += align_unit)
+                     {
+                         void *probe_addr = (void *)(uintptr_t)slot;
+                         SIZE_T probe_sz = 0x10000;

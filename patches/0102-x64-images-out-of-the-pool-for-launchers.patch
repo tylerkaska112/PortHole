@@ -1,0 +1,20 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -12447,13 +12447,10 @@
+  * test cannot read stays on the old path. */
+ static int ios_x64_image_data_enabled(void)
+ {
+-    static int cached = -1;
+-    if (cached < 0)
+-    {
+-        const char *e = getenv( "MADEIRA_X64_IMAGE_DATA" );
+-        cached = (e && *e == '1');
+-    }
+-    return cached;
++    /* 0102: read on every call (it was cached for the life of the app): a launch that starts after another one in the same app run
++     * sets or clears it, and a stale answer left RDR2's launcher chain (Rockstar's libcef.dll is 250 MB, loaded by two processes) out of memory. */
++    const char *e = getenv( "MADEIRA_X64_IMAGE_DATA" );
++    return e && *e == '1';
+ }
+ 
+ static int ios_x64_image_is_host_data( const void *base, size_t size )

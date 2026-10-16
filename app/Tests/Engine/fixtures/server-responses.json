@@ -1,0 +1,226 @@
+{
+  "list": [
+    {
+      "id": 1,
+      "gameId": "steam:427520",
+      "name": "Shooter layout",
+      "notes": "FPS",
+      "hasPad": true,
+      "hasTouch": true,
+      "controlCount": 8,
+      "bindCount": 3,
+      "look": true,
+      "up": 1,
+      "down": 0,
+      "downloads": 0,
+      "version": 1,
+      "updated": "2026-10-04"
+    },
+    {
+      "id": 2,
+      "gameId": "steam:427520",
+      "name": null,
+      "notes": null,
+      "hasPad": true,
+      "hasTouch": false,
+      "controlCount": 0,
+      "bindCount": 0,
+      "look": false,
+      "up": 0,
+      "down": 0,
+      "downloads": 0,
+      "version": 1,
+      "updated": "2026-10-04"
+    },
+    {
+      "id": 3,
+      "gameId": "steam:427520",
+      "name": "Touch only",
+      "notes": null,
+      "hasPad": false,
+      "hasTouch": true,
+      "controlCount": 7,
+      "bindCount": 0,
+      "look": false,
+      "up": 0,
+      "down": 0,
+      "downloads": 0,
+      "version": 1,
+      "updated": "2026-10-04"
+    }
+  ],
+  "detail": {
+    "id": 1,
+    "gameId": "steam:427520",
+    "name": "Shooter layout",
+    "notes": "FPS",
+    "hasPad": true,
+    "hasTouch": true,
+    "controlCount": 8,
+    "bindCount": 3,
+    "look": true,
+    "up": 1,
+    "down": 0,
+    "downloads": 0,
+    "version": 1,
+    "updated": "2026-10-04",
+    "pad": {
+      "binds": {
+        "A": "key-F",
+        "LS": "arrows",
+        "RT": "lmb"
+      },
+      "mouseVertical": 1.5
+    },
+    "touch": {
+      "look": true,
+      "controls": [
+        {
+          "label": "",
+          "action": "stick-wasd",
+          "mode": "tap",
+          "x": 0.13,
+          "y": 0.72,
+          "size": 120
+        },
+        {
+          "label": "FIRE",
+          "action": "lmb",
+          "mode": "tap",
+          "x": 0.9,
+          "y": 0.8,
+          "size": 76
+        },
+        {
+          "label": "ALT",
+          "action": "rmb",
+          "mode": "tap",
+          "x": 0.79,
+          "y": 0.8,
+          "size": 76
+        },
+        {
+          "label": "Jump",
+          "action": "space",
+          "mode": "hold",
+          "x": 0.9,
+          "y": 0.58,
+          "size": 60
+        },
+        {
+          "label": "Use",
+          "action": "key-E",
+          "mode": "tap",
+          "x": 0.79,
+          "y": 0.58,
+          "size": 54
+        },
+        {
+          "label": "Duck",
+          "action": "ctrl",
+          "mode": "hold",
+          "x": 0.27,
+          "y": 0.84,
+          "size": 54
+        },
+        {
+          "label": "Run",
+          "action": "shift",
+          "mode": "hold",
+          "x": 0.27,
+          "y": 0.66,
+          "size": 54
+        },
+        {
+          "label": "R",
+          "action": "key-R",
+          "mode": "tap",
+          "x": 0.7,
+          "y": 0.88,
+          "size": 46
+        }
+      ]
+    }
+  },
+  "mine": [
+    {
+      "id": 1,
+      "gameId": "steam:427520",
+      "name": "Shooter layout",
+      "notes": "FPS",
+      "hasPad": true,
+      "hasTouch": true,
+      "controlCount": 8,
+      "bindCount": 3,
+      "look": true,
+      "up": 1,
+      "down": 0,
+      "downloads": 0,
+      "version": 1,
+      "updated": "2026-10-04",
+      "clientId": "11111111-2222-3333-4444-555555555555",
+      "textStatus": "approved",
+      "hidden": false,
+      "gameTitle": "Factorio"
+    },
+    {
+      "id": 2,
+      "gameId": "steam:427520",
+      "name": null,
+      "notes": null,
+      "hasPad": true,
+      "hasTouch": false,
+      "controlCount": 0,
+      "bindCount": 0,
+      "look": false,
+      "up": 0,
+      "down": 0,
+      "downloads": 0,
+      "version": 1,
+      "updated": "2026-10-04",
+      "clientId": "22222222-2222-3333-4444-555555555555",
+      "textStatus": "none",
+      "hidden": false,
+      "gameTitle": "Factorio"
+    },
+    {
+      "id": 3,
+      "gameId": "steam:427520",
+      "name": "Touch only",
+      "notes": null,
+      "hasPad": false,
+      "hasTouch": true,
+      "controlCount": 7,
+      "bindCount": 0,
+      "look": false,
+      "up": 0,
+      "down": 0,
+      "downloads": 0,
+      "version": 1,
+      "updated": "2026-10-04",
+      "clientId": "33333333-2222-3333-4444-555555555555",
+      "textStatus": "approved",
+      "hidden": false,
+      "gameTitle": "Factorio"
+    }
+  ],
+  "publish": {
+    "id": 1,
+    "replaced": false,
+    "textStatus": "pending"
+  },
+  "review": {
+    "replaced": false,
+    "commentStatus": "pending",
+    "up": 1,
+    "down": 0
+  },
+  "reviews": [
+    {
+      "id": 1,
+      "thumb": "up",
+      "comment": "Works well",
+      "date": "2026-10-04"
+    }
+  ]
+}

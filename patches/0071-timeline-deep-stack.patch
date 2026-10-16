@@ -1,0 +1,32 @@
+--- a/build/ntdll-unix/server_ios.c
++++ b/build/ntdll-unix/server_ios.c
+@@ -2080,15 +2080,26 @@
+             const char *why = "";
+             if (ios_live_snapshot( best, g, &rip, &cpsr, &why ) && g[4] > 0x10000 && (g[4] != last_rsp || g[5] != last_rbp))
+             {
+-                unsigned char buf[0x400];
++                static unsigned char buf[0x3400];
++                static uint64_t min_rsp = ~0ull;
++                static unsigned nbig;
++                size_t want = 0x400;
+                 char fn[64] = "-";
++                /* 0071: a jump of more than 0x800 bytes deeper than the lowest rsp so far (the call chain into the loop) saves 13 KB. */
++                /* only game stacks count (0x70........); the first run's low value came from a native thread and disabled the test */
++                if (g[4] > 0x7000000000ull && g[4] < 0x7fffffffffull)
++                {
++                    if (((min_rsp != ~0ull && g[4] + 0x800 < min_rsp) || (g[5] & 0xffff) == 0xc540) && nbig < 16) { want = sizeof(buf); nbig++; }
++                    if (g[4] < min_rsp) min_rsp = g[4];
++                }
+                 last_rsp = g[4]; last_rbp = g[5];
+-                if (ios_ts_read( g[4] - 0x40, buf, sizeof(buf) ))
++                if (want > 0x400 && !ios_ts_read( g[4] - 0x40, buf, want )) want = 0x400;
++                if (ios_ts_read( g[4] - 0x40, buf, want ))
+                 {
+                     FILE *f;
+                     snprintf( fn, sizeof(fn), "s%u.bin", nsnap );
+                     snprintf( path, sizeof(path), "%s/%s", dir, fn );
+-                    if ((f = fopen( path, "wb" ))) { fwrite( buf, 1, sizeof(buf), f ); fclose( f ); }
++                    if ((f = fopen( path, "wb" ))) { fwrite( buf, 1, want, f ); fclose( f ); }
+                 }
+                 fprintf( idx, "%ld t%u cpu%d rip=%#llx rsp=%#llx rbp=%#llx rax=%#llx rcx=%#llx rdx=%#llx %s\n", ms, (unsigned)best, best_cpu / 10,
+                          (unsigned long long)rip, (unsigned long long)g[4], (unsigned long long)g[5], (unsigned long long)g[0],

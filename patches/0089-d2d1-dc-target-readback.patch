@@ -1,0 +1,122 @@
+--- a/dlls/d2d1/dc_render_target.c
++++ b/dlls/d2d1/dc_render_target.c
+@@ -24,6 +24,75 @@
+ static inline struct d2d_dc_render_target *impl_from_IUnknown(IUnknown *iface)
+ {
+     return CONTAINING_RECORD(iface, struct d2d_dc_render_target, ID2D1DCRenderTarget_iface);
++}
++
++/* Porthole 0089: DXMT's textures have no IDXGISurface1, so BindDC found no surface and Present called through a NULL pointer (Rockstar's launcher, which draws its
++ * window through an ID2D1DCRenderTarget, died there). The pixels are read back through a staging texture and put on the DC instead. */
++static HRESULT d2d_dc_render_target_present_readback(struct d2d_dc_render_target *render_target)
++{
++    const RECT *dst_rect = &render_target->dst_rect;
++    D3D11_MAPPED_SUBRESOURCE mapped;
++    D3D11_TEXTURE2D_DESC desc;
++    ID3D11DeviceContext *context;
++    ID3D11Texture2D *src, *staging;
++    ID3D11Device *device;
++    BITMAPINFO info;
++    BYTE *bits;
++    UINT y, width, height;
++
++    if (!render_target->target_resource
++            || FAILED(ID3D11Resource_QueryInterface(render_target->target_resource, &IID_ID3D11Texture2D, (void **)&src)))
++        return S_OK;
++
++    ID3D11Texture2D_GetDesc(src, &desc);
++    if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
++            && desc.Format != DXGI_FORMAT_B8G8R8X8_UNORM)
++    {
++        FIXME("Unhandled target format %#x.\n", desc.Format);
++        ID3D11Texture2D_Release(src);
++        return S_OK;
++    }
++
++    desc.Usage = D3D11_USAGE_STAGING;
++    desc.BindFlags = 0;
++    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++    desc.MiscFlags = 0;
++    desc.MipLevels = 1;
++    desc.ArraySize = 1;
++
++    ID3D11Texture2D_GetDevice(src, &device);
++    ID3D11Device_GetImmediateContext(device, &context);
++    if (SUCCEEDED(ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging)))
++    {
++        ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)staging, (ID3D11Resource *)src);
++        if (SUCCEEDED(ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped)))
++        {
++            width = min(desc.Width, dst_rect->right - dst_rect->left);
++            height = min(desc.Height, dst_rect->bottom - dst_rect->top);
++            if ((bits = malloc((size_t)width * height * 4)))
++            {
++                for (y = 0; y < height; ++y)
++                    memcpy(bits + (size_t)y * width * 4, (BYTE *)mapped.pData + (size_t)y * mapped.RowPitch, (size_t)width * 4);
++
++                memset(&info, 0, sizeof(info));
++                info.bmiHeader.biSize = sizeof(info.bmiHeader);
++                info.bmiHeader.biWidth = width;
++                info.bmiHeader.biHeight = -(LONG)height;
++                info.bmiHeader.biPlanes = 1;
++                info.bmiHeader.biBitCount = 32;
++                info.bmiHeader.biCompression = BI_RGB;
++                SetDIBitsToDevice(render_target->hdc, dst_rect->left, dst_rect->top, width, height, 0, 0, 0, height,
++                        bits, &info, DIB_RGB_COLORS);
++                free(bits);
++            }
++            ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
++        }
++        ID3D11Texture2D_Release(staging);
++    }
++    ID3D11DeviceContext_Release(context);
++    ID3D11Device_Release(device);
++    ID3D11Texture2D_Release(src);
++    return S_OK;
+ }
+ 
+ static HRESULT d2d_dc_render_target_present(IUnknown *outer_unknown)
+@@ -37,6 +106,9 @@
+     if (!render_target->hdc)
+         return D2DERR_WRONG_STATE;
+ 
++    if (!render_target->dxgi_surface)
++        return d2d_dc_render_target_present_readback(render_target);
++
+     if (FAILED(hr = IDXGISurface1_GetDC(render_target->dxgi_surface, FALSE, &src_hdc)))
+     {
+         WARN("GetDC() failed, %#lx.\n", hr);
+@@ -98,6 +170,8 @@
+         IUnknown_Release(render_target->dxgi_inner);
+         if (render_target->dxgi_surface)
+             IDXGISurface1_Release(render_target->dxgi_surface);
++        if (render_target->target_resource)
++            ID3D11Resource_Release(render_target->target_resource);
+         ID3D10Device1_Release(render_target->d3d_device);
+         free(render_target);
+     }
+@@ -751,7 +825,13 @@
+     }
+ 
+     bitmap_impl = unsafe_impl_from_ID2D1Bitmap(bitmap);
+-    ID3D11Resource_QueryInterface(bitmap_impl->resource, &IID_IDXGISurface1, (void **)&dxgi_surface);
++    dxgi_surface = NULL;
++    if (FAILED(ID3D11Resource_QueryInterface(bitmap_impl->resource, &IID_IDXGISurface1, (void **)&dxgi_surface)))
++        dxgi_surface = NULL;
++    if (render_target->target_resource)
++        ID3D11Resource_Release(render_target->target_resource);
++    render_target->target_resource = bitmap_impl->resource;
++    ID3D11Resource_AddRef(render_target->target_resource);
+ 
+     ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
+     ID2D1Bitmap_Release(bitmap);
+--- a/dlls/d2d1/d2d1_private.h
++++ b/dlls/d2d1/d2d1_private.h
+@@ -257,6 +257,7 @@
+     LONG refcount;
+ 
+     IDXGISurface1 *dxgi_surface;
++    ID3D11Resource *target_resource; /* Porthole 0089: the bitmap behind dxgi_surface, kept for a device whose surfaces have no GetDC (DXMT) */
+     ID3D10Device1 *d3d_device;
+     ID2D1RenderTarget *dxgi_target;
+     IUnknown *dxgi_inner;

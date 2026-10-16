@@ -1,0 +1,37 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -12845,6 +12845,34 @@
+                 }
+                 image_base = NULL;
+                 image_size = 0;
++            }
++
++            /* Porthole 0048: a raw FILE view that starts with an MZ header is not an image. Black Ops 3's protection maps a Windows DLL
++             * from disk as a plain section (1 MB, PAGE_EXECUTE_READ) to compare it with the loaded copy. The backward scan found the MZ
++             * at the view's start and took SizeOfImage (0x118000, the DLL's size when LOADED) as the extent, so the copy into the pool read
++             * 0x18000 bytes past the 1 MB view and faulted (with virtual_mutex held: the deadlock of patch 0047). Check that the last page of
++             * the claimed image is mapped; if not, nothing here is an image: leave the view readable (nothing executes a file view). */
++            if (image_base && image_size)
++            {
++                mach_vm_address_t qa = ((mach_vm_address_t)image_base + image_size - 1) & ~(mach_vm_address_t)0x3fff;
++                mach_vm_size_t qs = 0;
++                vm_region_basic_info_data_64_t qinfo;
++                mach_msg_type_number_t qcnt = VM_REGION_BASIC_INFO_COUNT_64;
++                mach_port_t qobj = MACH_PORT_NULL;
++                mach_vm_address_t want = qa;
++                if (mach_vm_region( mach_task_self(), &qa, &qs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&qinfo, &qcnt, &qobj ) != KERN_SUCCESS ||
++                    qa > want || !(qinfo.protection & VM_PROT_READ))
++                {
++                    static int partial_logs;
++                    if (partial_logs < 12)
++                    {
++                        partial_logs++;
++                        dprintf( 2, "[mprotect-exec] 0048 %p+0x%lx: the MZ header at %p claims SizeOfImage 0x%lx but its last page is not mapped: a raw file view, left readable (no pool copy)\n",
++                                 base, (unsigned long)size, image_base, (unsigned long)image_size );
++                    }
++                    mprotect( base, size, PROT_READ );
++                    return 0;
++                }
+             }
+ 
+             if (!image_base || !image_size)

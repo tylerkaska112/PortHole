@@ -1,0 +1,82 @@
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -1138,6 +1138,7 @@
+ static int madeira_fast_on;           /* client wake path active; 0 -> 1 only */
+ static int madeira_fast_peek;         /* MADEIRA_FS_POLLPEEK, on with cells   */
+ static int madeira_fast_sem;          /* MADEIRA_FASTSYNC_SEM                 */
++static int madeira_fast_alert;        /* MADEIRA_FASTSYNC_ALERTABLE (0140)    */
+ static int madeira_fast_ready;        /* the parse has happened               */
+ 
+ static unsigned int madeira_fast_auto_reqs = MADEIRA_FS_AUTO_REQS_DEFAULT;
+@@ -1168,7 +1169,7 @@
+ static void madeira_fast_parse_env(void)
+ {
+     const char *e = getenv( "MADEIRA_FASTSYNC" );   /* off unless 1/on/yes, auto or cells */
+-    int mode = MADEIRA_FS_MODE_OFF, asked, peek, sem;
++    int mode = MADEIRA_FS_MODE_OFF, asked, peek, sem, alert;
+ 
+     if (madeira_env_is( e, "1", "on", "yes" )) mode = MADEIRA_FS_MODE_ON;
+     else if (madeira_env_is( e, "auto", "auto", NULL )) mode = MADEIRA_FS_MODE_AUTO;
+@@ -1181,6 +1182,11 @@
+     e = getenv( "MADEIRA_FASTSYNC_SEM" );   /* 1: semaphores use cells too (off by default) */
+     sem = mode != MADEIRA_FS_MODE_OFF && madeira_env_is( e, "1", "on", "yes" );
+ 
++    /* 0140: 1: a one-handle alertable wait takes the fast path too. Unity's worker threads wait on their job semaphore with WaitForSingleObjectEx(.., TRUE),
++     * which was always sent to the server (10,000 select + 10,000 release_semaphore requests a second). A wait satisfied at once leaves a queued APC for the
++     * thread's next alertable wait, as on Windows; one that has to sleep parks for the cap (2 ms) at most and then asks the server, which delivers the APC. */
++    alert = mode != MADEIRA_FS_MODE_OFF && madeira_env_is( getenv( "MADEIRA_FASTSYNC_ALERTABLE" ), "1", "on", "yes" );
++
+     if ((e = getenv( "MADEIRA_FASTSYNC_CAP_US" )))   /* longest fast park before server_wait, 50..50000 us (2000) */
+     {
+         unsigned long us = strtoul( e, NULL, 10 );
+@@ -1203,6 +1209,7 @@
+ 
+     __atomic_store_n( &madeira_fast_peek, peek, __ATOMIC_RELAXED );
+     __atomic_store_n( &madeira_fast_sem, sem, __ATOMIC_RELAXED );
++    __atomic_store_n( &madeira_fast_alert, alert, __ATOMIC_RELAXED );
+     __atomic_store_n( &madeira_fast_on, mode == MADEIRA_FS_MODE_ON ? 1 : 0, __ATOMIC_RELAXED );
+     __atomic_store_n( &madeira_fast_mode, mode, __ATOMIC_RELAXED );
+     __atomic_store_n( &madeira_fast_asked, asked, __ATOMIC_RELAXED );
+@@ -1229,9 +1236,9 @@
+         ERR( "[fastsync] not started: madsync owns in-process synchronisation in this session "
+              "(madeira.cfg inproc-sync = 0 selects fastsync)\n" );
+     else
+-        ERR( "[fastsync] mode=%s peek=%s sem=%s cells=%u cap=%uus spin=%lluus auto=%u/10s\n",
++        ERR( "[fastsync] mode=%s peek=%s sem=%s alertable=%s cells=%u cap=%uus spin=%lluus auto=%u/10s\n",
+              mode == MADEIRA_FS_MODE_CELLS ? "cells" : mode == MADEIRA_FS_MODE_AUTO ? "auto" : "on",
+-             madeira_fast_peek ? "on" : "off", madeira_fast_sem ? "on" : "off",
++             madeira_fast_peek ? "on" : "off", madeira_fast_sem ? "on" : "off", madeira_fast_alert ? "on" : "off",
+              (unsigned int)MADEIRA_SYNC_CELLS, (unsigned int)(madeira_fast_cap_ns / 1000),
+              madeira_fast_spin_ns / 1000, madeira_fast_auto_reqs );
+ }
+@@ -1244,6 +1251,12 @@
+ }
+ 
+ /* "may this call touch a SEMAPHORE cell at all" */
++static inline int madeira_fast_alert_enabled(void)
++{
++    madeira_fast_init();
++    return __atomic_load_n( &madeira_fast_alert, __ATOMIC_RELAXED );
++}
++
+ static inline int madeira_fast_sem_enabled(void)
+ {
+     madeira_fast_init();
+@@ -3438,7 +3451,7 @@
+ 
+ #ifdef WINE_IOS
+     /* fastsync: a one-handle WaitAny is the only multi-object shape it takes */
+-    if (count == 1 && type != WaitAll && !alertable)
++    if (count == 1 && type != WaitAll && (!alertable || madeira_fast_alert_enabled()))
+     {
+         const LARGE_INTEGER *left;
+ 
+@@ -3501,7 +3514,7 @@
+     }
+ 
+ #ifdef WINE_IOS
+-    if (!alertable)
++    if (!alertable || madeira_fast_alert_enabled())
+     {
+         const LARGE_INTEGER *left;
+ 

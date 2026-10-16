@@ -1,0 +1,50 @@
+diff -ru a/app/Runtime/MadeiraConfig.swift b/app/Runtime/MadeiraConfig.swift
+--- a/app/Runtime/MadeiraConfig.swift
++++ b/app/Runtime/MadeiraConfig.swift
+@@ -99,7 +99,10 @@
+     /// wins. A launch without a game file (applyExtras unset the variable) is
+     /// upstream's behaviour unchanged.
+     @discardableResult
+-    static func applyGame(_ text: String?) throws -> [String: String] {
++    static func applyGame(_ rawText: String?) throws -> [String: String] {
++        // Two env lines typed or pasted on one line ("env.A = 0 env.B = 0") used to become ONE entry, A = "0 env.B = 0", and B silently never applied (a test of
++        // MADEIRA_FEX_LEAN did nothing on 2026-10-15). Each `env.NAME =` that follows other text on a line starts a new line.
++        let text = rawText?.replacingOccurrences(of: #"[ \t]+(env\.[A-Za-z_][A-Za-z0-9_]*[ \t]*=)"#, with: "\n$1", options: .regularExpression)
+         let profileURL = bcdProfileURL()
+         unsetenv("MADEIRA_CFG_GAME")
+         let pairs = parse(text ?? "")
+diff -ru a/app/Runtime/WineProcessBridge.m b/app/Runtime/WineProcessBridge.m
+--- a/app/Runtime/WineProcessBridge.m
++++ b/app/Runtime/WineProcessBridge.m
+@@ -1364,6 +1364,22 @@
+                 if (madeira_cfg_sync_engine() == MADEIRA_SYNC_FASTSYNC && !getenv("MADEIRA_FASTSYNC")) {
+                     setenv("MADEIRA_FASTSYNC", "auto", 0);
+                     fprintf(stderr, "[madeira-env] sync engine: fastsync (default), MADEIRA_FASTSYNC=auto\n");
++                }
++                /* 0.50.330: with fastsync on, semaphores, interruptible (alertable) one-handle waits and a 20 ms fast park are the defaults. Unity's job system
++                 * waits on one semaphore with an alertable wait; on the server that was 10,000 select + 10,000 release_semaphore requests a second, and a game that
++                 * ran at 10-13 fps ran at 23-26 fps without them (patches 0139/0140). Anything the game's own lines or madeira.cfg set stays; env.MADEIRA_FASTSYNC_SEM = 0,
++                 * env.MADEIRA_FASTSYNC_ALERTABLE = 0 or env.MADEIRA_FASTSYNC = 0 switch them off for a game. */
++                /* Porthole 0.50.379: upstream's call/return shadow-stack elision (FEX 813bc99) is OFF unless a game's own line asks for it (env.MADEIRA_FEX_CALLRET_ELIDE = 1).
++                 * Subnautica failed early with it on in both runs (18:00 freeze at ReloadAssembly, 18:40 null read in FMOD at the start screen) and reached the old crash with it
++                 * off; The Forest ran ~14% faster with it. Anything the game's own lines or madeira.cfg set stays. */
++                setenv("MADEIRA_FEX_CALLRET_ELIDE", "0", 0);
++                {
++                    const char *fs = getenv("MADEIRA_FASTSYNC");
++                    if (fs && strcmp(fs, "0") && strcmp(fs, "off") && strcmp(fs, "no")) {
++                        setenv("MADEIRA_FASTSYNC_SEM", "1", 0);
++                        setenv("MADEIRA_FASTSYNC_ALERTABLE", "1", 0);
++                        setenv("MADEIRA_FASTSYNC_CAP_US", "20000", 0);
++                    }
+                 }
+                 {   /* madeira-bcd: for the wineserver (g_madeira_srv_fgetpath) */
+                     const char *fp = getenv("MADEIRA_SRV_FGETPATH");
+@@ -1935,7 +1951,7 @@
+         g_wine_running = 0;
+         /* ml1184: these belong to the launch that just ended; a later session in this app
+          * run gets its own from its game, or madeira.cfg's. */
+-        unsetenv("MADEIRA_FASTSYNC"); unsetenv("MADEIRA_FASTSYNC_SEM");
++        unsetenv("MADEIRA_FASTSYNC"); unsetenv("MADEIRA_FASTSYNC_SEM"); unsetenv("MADEIRA_FASTSYNC_ALERTABLE"); unsetenv("MADEIRA_FASTSYNC_CAP_US");
+         unsetenv("MADEIRA_CPU_COUNT"); unsetenv("DXMT_D9_ANISO_LIMIT");
+         unsetenv("FEX_X87REDUCEDPRECISION");   /* ml1184 */
+         unsetenv("MADEIRA_DINPUT_PAD");        /* ml1240 */

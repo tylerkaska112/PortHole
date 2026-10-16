@@ -1,0 +1,3 @@
+# 0051 - guest registers and frame of a hot thread (diagnostic)
+
+0.50.91 (engine r14): the System32 redirect works (`[sysx64] 0050 ... -> ...sysx64...: 00000000`), Black Ops 3 maps the clean 1.5 MB ntdll (SEC_COMMIT, `[sc] #1/#2`), then one thread spends 2+ minutes at 100% CPU in ONE guest block (`[rip-profile] ml1110 code @0x705927fa80 (100%)`: `mov rax,[rbp+0x80]; mov edx,[rax]; mov [rbp+0x3c],edx; mov eax,[rax+4]; mov [rbp+0x40],eax; add qword [rbp+0x80],8; mov dword [rbp+0x8c],1; jmp ...` - walking a table of 8-byte entries). `server_ios.c` thread sampler: for a thread at >= 90% CPU in guest code, `[thread-regs] 0051 rip= RAX= ... R15=`, the 0xa0 bytes at rbp+0x30 and 0x80 bytes around `*(rbp+0x80)` (first 24 lines). Logging only.

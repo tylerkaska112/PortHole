@@ -1,0 +1,119 @@
+--- a/build/ntdll-unix/server_ios.c
++++ b/build/ntdll-unix/server_ios.c
+@@ -866,6 +866,7 @@
+     wine_log_write( "[dump] 0068 wrote the running program's memory to %s", dir );
+ }
+ 
++extern volatile int ios_blackops3_started;
+ static void ios_thread_sampler_pass(int burst)
+ {
+     extern uint64_t ios_native_rip_from_hostpc( uint64_t, uint64_t, const char ** );
+@@ -974,7 +975,7 @@
+                             /* Porthole 0068: after the sixth identical hot sample, dump the process for offline analysis (once). */
+                             {
+                                 static int dump_count, dump_done;
+-                                if (!dump_done && ++dump_count == 6) { dump_done = 1; ios_dump_process_for_analysis( fr_rip, g[4], x18, g, tlist[k] ); }
++                                if (ios_blackops3_started && !dump_done && ++dump_count == 6) { dump_done = 1; ios_dump_process_for_analysis( fr_rip, g[4], x18, g, tlist[k] ); }
+                             }
+                             /* Porthole 0053: follow the jumps. Protected code is a chain of short blocks joined by `jmp rel32` / `jcc rel32`; walk them
+                              * breadth first from the entry (96 bytes per block, 160 blocks, once per run) so the whole loop can be disassembled from the
+@@ -2033,6 +2034,88 @@
+ }
+ 
+ 
++/* Porthole 0070 (diagnostic): a timeline of the busiest guest thread from the start of the run, to see how a long loop was entered. Every 50 ms
++ * the live registers (0069) of the thread with the most CPU are read; when its (rsp, rbp) pair changes, the stack from rsp-0x40 for 0x400 bytes
++ * is saved. Documents/bo3-timeline/: index.txt (ms, thread, cpu%, rip, rsp, rbp, rax, rcx, rdx, file) and s<n>.bin. At most 600 snapshots,
++ * for the first 150 s. Delete the folder afterwards. */
++static void *ios_timeline_main( void *arg )
++{
++    const char *docs = getenv( "MADEIRA_DOCS_DIR" );
++    char dir[900], path[1024];
++    FILE *idx;
++    struct timespec t0, now;
++    uint64_t last_rsp = 0, last_rbp = 0;
++    unsigned nsnap = 0;
++    (void)arg;
++    if (!docs) return NULL;
++    snprintf( dir, sizeof(dir), "%s/bo3-timeline", docs );
++    mkdir( dir, 0777 );
++    snprintf( path, sizeof(path), "%s/index.txt", dir );
++    if (!(idx = fopen( path, "w" ))) return NULL;
++    clock_gettime( CLOCK_MONOTONIC, &t0 );
++    for (;;)
++    {
++        mach_port_t self_port = pthread_mach_thread_np( pthread_self() ), best = 0;
++        thread_act_array_t tlist;
++        mach_msg_type_number_t tcount, k;
++        int best_cpu = 0;
++        long ms;
++        usleep( 50000 );
++        clock_gettime( CLOCK_MONOTONIC, &now );
++        ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
++        if (ms > 150000 || nsnap >= 600) break;
++        if (task_threads( mach_task_self(), &tlist, &tcount ) != KERN_SUCCESS) continue;
++        for (k = 0; k < tcount; k++)
++        {
++            thread_basic_info_data_t bi;
++            mach_msg_type_number_t bic = THREAD_BASIC_INFO_COUNT;
++            if (tlist[k] == self_port) continue;
++            if (thread_info( tlist[k], THREAD_BASIC_INFO, (thread_info_t)&bi, &bic ) != KERN_SUCCESS) continue;
++            if (bi.cpu_usage > best_cpu) { best_cpu = bi.cpu_usage; best = tlist[k]; }
++        }
++        if (best && best_cpu >= 300)
++        {
++            uint64_t g[16], rip = 0;
++            uint32_t cpsr;
++            const char *why = "";
++            if (ios_live_snapshot( best, g, &rip, &cpsr, &why ) && g[4] > 0x10000 && (g[4] != last_rsp || g[5] != last_rbp))
++            {
++                unsigned char buf[0x400];
++                char fn[64] = "-";
++                last_rsp = g[4]; last_rbp = g[5];
++                if (ios_ts_read( g[4] - 0x40, buf, sizeof(buf) ))
++                {
++                    FILE *f;
++                    snprintf( fn, sizeof(fn), "s%u.bin", nsnap );
++                    snprintf( path, sizeof(path), "%s/%s", dir, fn );
++                    if ((f = fopen( path, "wb" ))) { fwrite( buf, 1, sizeof(buf), f ); fclose( f ); }
++                }
++                fprintf( idx, "%ld t%u cpu%d rip=%#llx rsp=%#llx rbp=%#llx rax=%#llx rcx=%#llx rdx=%#llx %s\n", ms, (unsigned)best, best_cpu / 10,
++                         (unsigned long long)rip, (unsigned long long)g[4], (unsigned long long)g[5], (unsigned long long)g[0],
++                         (unsigned long long)g[1], (unsigned long long)g[2], fn );
++                fflush( idx );
++                nsnap++;
++            }
++        }
++        for (k = 0; k < tcount; k++) mach_port_deallocate( mach_task_self(), tlist[k] );
++        vm_deallocate( mach_task_self(), (vm_address_t)tlist, tcount * sizeof(*tlist) );
++    }
++    fclose( idx );
++    return NULL;
++}
++
++
++/* 0070: set when a program called blackops3.exe is started (process_ios.c); the timeline and the 0068 dump are for that program only. */
++volatile int ios_blackops3_started;
++void ios_timeline_start( void )
++{
++    static int started;
++    pthread_t tl;
++    if (started) return;
++    started = 1;
++    if (!pthread_create( &tl, NULL, ios_timeline_main, NULL )) pthread_detach( tl );
++}
++
+ static void ios_thread_sampler_main(void)
+ {
+     int gen = 0;
+--- a/build/ntdll-unix/process_ios.c
++++ b/build/ntdll-unix/process_ios.c
+@@ -1135,7 +1135,7 @@
+             {
+                 if (i && b[i - 1] != '\\') continue;
+                 for (j = 0; j < n; j++) if ((b[i + j] | 0x20) != (want[j] | 0x20)) break;
+-                if (j == n) { for (j = 0; j < n; j++) b[i + j] = want[j]; ERR( "[exe-case] 0066 %s fixed to the on-disk spelling\n", k ? "command line" : "image path" ); }
++                if (j == n) { extern volatile int ios_blackops3_started; extern void ios_timeline_start( void ); ios_blackops3_started = 1; ios_timeline_start(); for (j = 0; j < n; j++) b[i + j] = want[j]; ERR( "[exe-case] 0066 %s fixed to the on-disk spelling\n", k ? "command line" : "image path" ); }
+             }
+         }
+     }

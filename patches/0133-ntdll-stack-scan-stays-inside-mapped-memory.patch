@@ -1,0 +1,42 @@
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -3086,8 +3086,19 @@
+                         ULONG_PTR sp = (ULONG_PTR)orig_context->Rsp;
+                         unsigned printed = 0, i, j;
+ 
++                        ULONG_PTR stack_top = (ULONG_PTR)NtCurrentTeb()->Tib.StackBase;
++                        SIZE_T want = sizeof(stk);
++                        SIZE_T image_size = 0;
++                        const IMAGE_NT_HEADERS *nt = base ? RtlImageNtHeader( (void *)base ) : NULL;
++
++                        if (nt) image_size = nt->OptionalHeader.SizeOfImage;
++
++                        /* 0133: 0.50.316 read 4 KB blindly and crossed the top of the stack into an unmapped page: the read faulted (a BUS error inside the exception path) and the
++                         * program ended with 0x80000101 instead of its own error. Never read past the stack base, and only when the base is plausible. */
++                        if (stack_top > sp && stack_top - sp <= 0x1000000) { if (stack_top - sp < want) want = (stack_top - sp) & ~(SIZE_T)7; }
++                        else want = 0;
+                         got = 0;
+-                        if (!NtReadVirtualMemory( GetCurrentProcess(), (void *)sp, stk, sizeof(stk), &got ) && got >= 64)
++                        if (want >= 64 && !NtReadVirtualMemory( GetCurrentProcess(), (void *)sp, stk, want, &got ) && got >= 64)
+                         {
+                             for (i = 0; i + 4 <= got && printed < 40; )
+                             {
+@@ -3109,7 +3120,8 @@
+                                 char str[48];
+                                 SIZE_T g2 = 0;
+ 
+-                                if (pv < 0x10000 || pv >= 0x800000000000ULL) continue;
++                                /* 0133: only follow pointers into places known to be mapped (the program image, and the stack up to its base): a read of anything else can fault in the middle of exception dispatch. */
++                                if (!((base && image_size && pv >= base && pv + sizeof(str) < base + image_size) || (pv >= sp && pv + sizeof(str) < stack_top))) continue;
+                                 memset( str, 0, sizeof(str) );
+                                 if (NtReadVirtualMemory( GetCurrentProcess(), (void *)(ULONG_PTR)pv, str, sizeof(str) - 1, &g2 ) || g2 < 3) continue;
+                                 for (j = 0; j < g2 && str[j] >= 32 && str[j] < 127; j++) ;
+@@ -3120,7 +3132,7 @@
+                                 }
+                             }
+                         }
+-                        else ERR( "[exc] 0132   stack at %p UNREADABLE\n", (void *)sp );
++                        else ERR( "[exc] 0132   stack at %p not read (base %p)\n", (void *)sp, (void *)stack_top );
+                     }
+                 }
+ 

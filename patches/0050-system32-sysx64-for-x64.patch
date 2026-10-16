@@ -1,0 +1,110 @@
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4677,7 +4677,76 @@
+              (!got || status) ? "  <-- END/ERROR" : "" );
+ }
+ #endif
++
++#ifdef WINE_IOS
++/* Porthole 0050: what an x64 program sees in System32. On Windows for ARM64 an x64 process finds x64-compatible (ARM64X / ARM64EC)
++ * files in System32; this prefix keeps Wine's native ARM64 builds there and the x64-compatible ones in "sysx64" (the loader already
++ * falls back to it for LoadLibrary: "mixed-arch fallback"). A program that opens a system DLL as a FILE got the ARM64 one: Black Ops 3's
++ * protection maps clean copies of system DLLs from System32 to compare them with the loaded ones and run code in them. Only plain opens
++ * for reading of a file directly in System32 whose sysx64 twin exists, only for processes whose own image is x64. */
++static BOOL ios_x64_process(void)
++{
++    const char *base = NtCurrentTeb()->Peb->ImageBaseAddress;
++    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
++    const IMAGE_NT_HEADERS *nt;
++
++    if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE || !dos->e_lfanew || dos->e_lfanew > 0x1000) return FALSE;
++    nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
++    return nt->Signature == IMAGE_NT_SIGNATURE && nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64;
++}
++
++static BOOL ios_sysx64_alt_name( const UNICODE_STRING *name, WCHAR *buf, UNICODE_STRING *alt )
++{
++    static const char prefix[] = "\\??\\C:\\windows\\system32\\";
++    static const char repl[] = "\\??\\C:\\windows\\sysx64\\";
++    unsigned int i, len = name->Length / sizeof(WCHAR), plen = sizeof(prefix) - 1, rlen = sizeof(repl) - 1, ext;
+ 
++    if (!name->Buffer || len < plen + 5 || len > MAX_PATH) return FALSE;
++    for (i = 0; i < plen; i++)
++    {
++        WCHAR c = name->Buffer[i];
++        char d = prefix[i];
++        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++        if (d >= 'A' && d <= 'Z') d += 'a' - 'A';   /* the prefix has an upper-case drive letter */
++        if (c != (WCHAR)d && !(c == '/' && d == '\\')) return FALSE;
++    }
++    for (i = plen; i < len; i++) if (name->Buffer[i] == '\\' || name->Buffer[i] == '/') return FALSE;   /* directly in System32 */
++    /* Porthole 0063: ntdll.dll is served as ntdll-x64file.dll (the x64-compatible build cut to the end of its last section). The loader's own
++     * copy of the build is padded with 0x60000 bytes of zeros past its last section (the slack the iOS mapping relies on), and Black Ops 3's
++     * protection, which maps the file from disk as data and walks it, then spun at 100% CPU forever; given System32's ARM64 build instead
++     * (0054) it could not find the x64 syscall stubs it wants and executed int3 padding. */
++    if (len == plen + 9)
++    {
++        static const char nt[] = "ntdll.dll";
++        for (i = 0; i < 9; i++) if ((name->Buffer[plen + i] | 0x20) != nt[i]) break;
++        if (i == 9)
++        {
++            static const char alt_nt[] = "ntdll-x64file.dll";
++            for (i = 0; i < rlen; i++) buf[i] = repl[i];
++            for (i = 0; i < sizeof(alt_nt) - 1; i++) buf[rlen + i] = alt_nt[i];
++            buf[rlen + sizeof(alt_nt) - 1] = 0;
++            alt->Buffer = buf;
++            alt->Length = (rlen + sizeof(alt_nt) - 1) * sizeof(WCHAR);
++            alt->MaximumLength = alt->Length + sizeof(WCHAR);
++            return TRUE;
++        }
++    }
++    ext = len - 4;
++    if (name->Buffer[ext] != '.') return FALSE;
++    {
++        WCHAR a = name->Buffer[ext + 1] | 0x20, b = name->Buffer[ext + 2] | 0x20, c = name->Buffer[ext + 3] | 0x20;
++        if (!((a == 'd' && b == 'l' && c == 'l') || (a == 'e' && b == 'x' && c == 'e') || (a == 'd' && b == 'r' && c == 'v'))) return FALSE;
++    }
++    for (i = 0; i < rlen; i++) buf[i] = repl[i];
++    memcpy( buf + rlen, name->Buffer + plen, (len - plen) * sizeof(WCHAR) );
++    buf[rlen + len - plen] = 0;
++    alt->Buffer = buf;
++    alt->Length = (rlen + len - plen) * sizeof(WCHAR);
++    alt->MaximumLength = alt->Length + sizeof(WCHAR);
++    return TRUE;
++}
++#endif
++
+ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUTES *attr,
+                               IO_STATUS_BLOCK *io, LARGE_INTEGER *alloc_size,
+                               ULONG attributes, ULONG sharing, ULONG disposition,
+@@ -4698,6 +4767,30 @@
+ 
+     *handle = 0;
+     if (!attr || !attr->ObjectName) return STATUS_INVALID_PARAMETER;
++#ifdef WINE_IOS
++    if (disposition == FILE_OPEN && !attr->RootDirectory &&
++        !(access & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | DELETE | GENERIC_WRITE | GENERIC_ALL)))
++    {
++        WCHAR alt_buf[MAX_PATH + 16];
++        UNICODE_STRING alt_name;
++        if (ios_sysx64_alt_name( attr->ObjectName, alt_buf, &alt_name ) && ios_x64_process())
++        {
++            OBJECT_ATTRIBUTES alt_attr = *attr;
++            static int redirect_logs;
++            NTSTATUS alt_status;
++
++            alt_attr.ObjectName = &alt_name;
++            alt_status = NtCreateFile( handle, access, &alt_attr, io, alloc_size, attributes, sharing, disposition, options, ea_buffer, ea_length );
++            if (redirect_logs < 400)
++            {
++                redirect_logs++;
++                ERR( "[sysx64] 0050 %s -> %s: %08x\n", debugstr_us(attr->ObjectName), debugstr_us(&alt_name), alt_status );
++            }
++            if (!alt_status) return alt_status;
++            *handle = 0;
++        }
++    }
++#endif
+ 
+     if (alloc_size) FIXME( "alloc_size not supported\n" );
+ 

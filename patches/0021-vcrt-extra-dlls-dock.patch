@@ -1,0 +1,42 @@
+diff --git a/app/Runtime/WineProcessBridge.m b/app/Runtime/WineProcessBridge.m
+index 0b8c8e4..b205bc7 100644
+--- a/app/Runtime/WineProcessBridge.m
++++ b/app/Runtime/WineProcessBridge.m
+@@ -1328,6 +1328,37 @@ static void madeira_publish_host_probe(void)
+                 }
+             }
+ 
++            /* Porthole: the x64 VC++ runtime DLLs the ARM64EC bundle has no copy of (vcomp140, vcamp140, vccorlib140, vcruntime140_threads).
++             * The overlay further down only runs when the session's own target is x64, but the Dock session is an aarch64 explorer that
++             * starts the game as a child, so an x64 game importing vcomp140 (Far Cry 6's FC_m64d3d12.dll) died with c0000135. DLLs the bundle
++             * does have are left alone: they keep their ARM64EC builtins, as the exemptions in the overlay below require. */
++            {
++                NSString *vcrtDir = [bundlePath stringByAppendingPathComponent:@"x86_64-vcruntime"];
++                NSString *vcrtDown = [[[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject]
++                    stringByAppendingPathComponent:@"Porthole"] stringByAppendingPathComponent:@"x86_64-vcruntime"];
++                if ([fm fileExistsAtPath:[vcrtDown stringByAppendingPathComponent:@"vcruntime140.dll"]])
++                    vcrtDir = vcrtDown;
++                NSString *ecDir = [bundlePath stringByAppendingPathComponent:@"arm64ec-windows"];
++                NSString *aaDir = [bundlePath stringByAppendingPathComponent:@"aarch64-windows"];
++                int extraLinked = 0;
++                for (NSString *dll in [fm contentsOfDirectoryAtPath:vcrtDir error:nil]) {
++                    if (![dll.pathExtension.lowercaseString isEqualToString:@"dll"]) continue;
++                    if ([fm fileExistsAtPath:[ecDir stringByAppendingPathComponent:dll]] ||
++                        [fm fileExistsAtPath:[aaDir stringByAppendingPathComponent:dll]]) continue;
++                    NSString *src = [vcrtDir stringByAppendingPathComponent:dll];
++                    BOOL ok = NO;
++                    for (NSString *sub in @[ @"sysx64", @"system32" ]) {
++                        NSString *dst = [[prefix stringByAppendingPathComponent:
++                            [NSString stringWithFormat:@"drive_c/windows/%@", sub]] stringByAppendingPathComponent:dll];
++                        [fm removeItemAtPath:dst error:nil];
++                        if ([fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil]) ok = YES;
++                    }
++                    if (ok) extraLinked++;
++                }
++                dprintf(STDERR_FILENO, "[WineProc] x64 VC++ DLLs missing from the ARM64EC bundle: %d linked into sysx64 + system32 (from %s)\n",
++                        extraLinked, vcrtDir == vcrtDown ? "downloaded runtime" : "app bundle");
++            }
++
+             /* WoW64: the i386 farm, syswow64\wbem and the x86 side-by-side
+              * store for every session once the bundle has it (docs/WOW64.md).
+              * The store was seeded for a 32-bit target only, but a 64-bit

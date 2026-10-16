@@ -1,0 +1,49 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-11 22:36:53
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-11 22:36:53
+@@ -1541,7 +1541,7 @@
+     }
+     if (best_sz < 0x80020000ULL) return STATUS_NO_MEMORY;                    /* wants a hole of at least 2GB */
+     back = (SIZE_T)(best_sz - 0x20000);
+-    if (back > 0x100000000ULL) back = 0x100000000ULL;                        /* up to 4GB real */
++    if (back > 0x40000000ULL) back = 0x40000000ULL;                          /* 0109: up to 1GB real (4GB twice took 8 of the furniture window's 15) */
+     back &= ~(SIZE_T)0xffff;
+     pick = (void *)(uintptr_t)((best + 0x10000) & ~(mach_vm_address_t)0xffff);
+     csz = back;
+@@ -19341,6 +19341,9 @@
+     if (ios_pa32_soft_enabled()) ios_cage_base_v = 0x7600000000ULL;
+     /* ml433 (#72): hold back the only 8GB-aligned stretch in the guest band
+      * before top-down placement can put furniture in it — see IOS_CAGE_BASE. */
++    if (ios_pa32_soft_enabled())
++        dprintf( 2, "[cage] 0109 no 8GB holdback with pa-pool32-soft: the band takes [0x7400000000,0x7800000000) and Oilpan has its own slot\n" );
++    else
+     if (anon_mmap_fixed( (void *)(uintptr_t)IOS_CAGE_BASE, IOS_CAGE_REAL_SIZE, PROT_NONE, 0 ) != MAP_FAILED)
+     {
+         ios_cage_holdback_live = 1;
+@@ -24372,13 +24375,14 @@
+     if (ios_pa32_soft_enabled())
+     {
+         mach_vm_address_t probe = 0x7400000000ull;
+-        kern_return_t pk = mach_vm_map( mach_task_self(), &probe, 0x200000000ull, 0xffff, VM_FLAGS_FIXED,
++        kern_return_t pk = mach_vm_map( mach_task_self(), &probe, 0x400000000ull, 0xffff, VM_FLAGS_FIXED,
+                                         MEMORY_OBJECT_NULL, 0, 0, PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY );
+         if (pk == KERN_SUCCESS)
+         {
+-            mach_vm_deallocate( mach_task_self(), probe, 0x200000000ull );
+-            plan[0].lo = 0x7400000000ull; plan[0].hi = 0x75ffffffffull; plan[0].size = 0x200000000ull;   /* 8GB: the emulator needs about 3.5GB */
+-            plan[0].what = "Porthole 0018: 8GB band above the Oilpan slot";
++            mach_vm_deallocate( mach_task_self(), probe, 0x400000000ull );
++            /* 0109: 16GB again. 8GB (0.50.221) was full at boot of the Steam client alone, and a single-process Chromium adds 100+ threads to it. */
++            plan[0].lo = 0x7400000000ull; plan[0].hi = 0x77ffffffffull; plan[0].size = 0x400000000ull;
++            plan[0].what = "Porthole 0109: 16GB band below the 32GB pool";
+             ios_fex_band_reloc_wanted = 1;
+         }
+         else
+@@ -24426,7 +24430,7 @@
+         /* Porthole patch 0018: the "CoreAnimation range" is only where 32GB of tag-51 chunks happened to land in free space at start-up (first-fit,
+          * so its top, 0x7818000000 in the field log, depends on how much free space lies below). It overlaps the band and the pool this patch needs, and
+          * enforcing it moved the band to 0x7818000000, which left no 32GB hole. With the opt-in the band is kept where the probe proved the 16GB free. */
+-        if (ios_fex_band_reloc_wanted && addr == 0x7400000000ull && size == 0x200000000ull)
++        if (ios_fex_band_reloc_wanted && addr == 0x7400000000ull && size == 0x400000000ull)
+             dprintf( 2, "[pa32] patch0018 keeping the band at 0x7400000000 although it overlaps the measured CoreAnimation span 0x%llx..0x%llx\n",
+                      ios_layerkit_lo, ios_layerkit_hi );
+         else

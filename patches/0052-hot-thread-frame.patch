@@ -1,0 +1,50 @@
+--- a/build/ntdll-unix/server_ios.c
++++ b/build/ntdll-unix/server_ios.c
+@@ -798,7 +798,7 @@
+             if (rip && bi.cpu_usage >= 900)
+             {
+                 static int regs_logged;
+-                if (regs_logged < 24)
++                if (regs_logged < 40)
+                 {
+                     uint64_t rb = st.__fp, ptr = 0, qs[8];
+                     unsigned char loc[0xa0], pm[0x80];
+@@ -811,6 +811,38 @@
+                                     (unsigned long long)st.__x[26], (unsigned long long)st.__x[2], (unsigned long long)st.__x[3], (unsigned long long)st.__x[4],
+                                     (unsigned long long)st.__x[5], (unsigned long long)st.__x[19], (unsigned long long)st.__x[20], (unsigned long long)st.__x[21],
+                                     (unsigned long long)st.__x[22] );
++                    /* Porthole 0052: the same from the FEX frame (valid at a dispatcher boundary): rip at x28+0x18, gregs[0..15] at x28+0x20
++                     * in x86 order; the code at that rip and what the pointer registers point at. */
++                    {
++                        uint64_t fr_rip = 0, g[16];
++                        unsigned char code[0x180];
++                        if (ios_ts_read( x28 + 0x18, &fr_rip, 8 ) && ios_ts_read( x28 + 0x20, g, sizeof(g) ))
++                        {
++                            static const char *rn[16] = { "RAX","RCX","RDX","RBX","RSP","RBP","RSI","RDI","R8","R9","R10","R11","R12","R13","R14","R15" };
++                            char gl[600]; int gn = 0, q;
++                            for (q = 0; q < 16; q++) gn += snprintf( gl + gn, sizeof(gl) - gn, " %s=%#llx", rn[q], (unsigned long long)g[q] );
++                            wine_log_write( "[thread-regs] 0052 frame rip=%#llx%s", (unsigned long long)fr_rip, gl );
++                            if (fr_rip > 0x10000 && ios_ts_read( fr_rip - 0x40, code, sizeof(code) ))
++                            {
++                                char row[sizeof(code) * 2 + 1];
++                                for (q = 0; q < (int)sizeof(code); q++) snprintf( row + q * 2, 3, "%02x", code[q] );
++                                wine_log_write( "[thread-regs] 0052 code from rip-0x40: %s", row );
++                            }
++                            for (q = 0; q < 16; q++)
++                            {
++                                unsigned char pm2[48];
++                                uint64_t v = g[q];
++                                if (q == 4 || v < 0x100000000ull || v >= 0x800000000000ull) continue;
++                                if (ios_ts_read( q == 5 ? v + 0x20 : v, pm2, sizeof(pm2) ))
++                                {
++                                    char row[sizeof(pm2) * 2 + 1];
++                                    int w;
++                                    for (w = 0; w < (int)sizeof(pm2); w++) snprintf( row + w * 2, 3, "%02x", pm2[w] );
++                                    wine_log_write( "[thread-regs] 0052 *%s%s=%#llx: %s", rn[q], q == 5 ? "+0x20" : "", (unsigned long long)v, row );
++                                }
++                            }
++                        }
++                    }
+                     have_loc = ios_ts_read( rb + 0x30, loc, sizeof(loc) );
+                     if (have_loc)
+                     {

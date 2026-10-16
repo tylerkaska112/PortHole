@@ -1,0 +1,63 @@
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -3027,7 +3027,60 @@
+                         ERR( "[exc] ml812   report struct at %p unreadable\n",
+                              (void *)rec->ExceptionInformation[0] );
+                 }
++
++                /* Porthole 0130: Microsoft C++ throws (0xe06d7363, MSVC and clang-cl programs). ExceptionInformation = { magic 0x19930520.., object, ThrowInfo, image base }.
++                 * ThrowInfo { attributes, pmfnUnwind, pForwardCompat, pCatchableTypeArray } holds image-relative offsets; each CatchableType's pType is a type_info whose name
++                 * starts at +0x10. For std::exception and its subclasses the object is { vftable, const char *what, bool free }; custom classes show their first bytes instead. */
++                if (rec->ExceptionCode == 0xe06d7363 && rec->NumberParameters >= 3)
++                {
++                    ULONG_PTR obj = rec->ExceptionInformation[1], ti = rec->ExceptionInformation[2];
++                    ULONG_PTR base = rec->NumberParameters >= 4 ? rec->ExceptionInformation[3] : 0;
++                    int th[4], cta[8];
++                    ULONG64 ob[8];
++                    SIZE_T got = 0;
++                    unsigned k;
++
++                    ERR( "[exc] 0130 C++ throw (Microsoft): magic=%p object=%p throwinfo=%p image-base=%p\n",
++                         (void *)rec->ExceptionInformation[0], (void *)obj, (void *)ti, (void *)base );
++                    if (!NtReadVirtualMemory( GetCurrentProcess(), (void *)ti, th, sizeof(th), &got ) && got == sizeof(th) && th[3])
++                    {
++                        if (!NtReadVirtualMemory( GetCurrentProcess(), (void *)(base + (unsigned)th[3]), cta, sizeof(cta), &got ) && got == sizeof(cta))
++                        {
++                            for (k = 0; k < 4 && (int)k < cta[0]; k++)
++                            {
++                                int ct[2];
++                                char nm[100];
++                                ULONG_PTR tp;
+ 
++                                if (NtReadVirtualMemory( GetCurrentProcess(), (void *)(base + (unsigned)cta[1 + k]), ct, sizeof(ct), &got ) || got != sizeof(ct)) break;
++                                tp = base + (unsigned)ct[1];
++                                memset( nm, 0, sizeof(nm) );
++                                if (!NtReadVirtualMemory( GetCurrentProcess(), (void *)(tp + 0x10), nm, sizeof(nm) - 1, &got ) && got)
++                                {
++                                    SIZE_T j;
++                                    for (j = 0; j < sizeof(nm) - 1; j++)
++                                        if (nm[j] && (nm[j] < 32 || (unsigned char)nm[j] >= 127)) { nm[j] = 0; break; }
++                                    ERR( "[exc] 0130   thrown type #%u: \"%s\"\n", k, nm );
++                                }
++                                else
++                                    ERR( "[exc] 0130   thrown type #%u: name UNREADABLE (type_info %p)\n", k, (void *)tp );
++                            }
++                        }
++                        else ERR( "[exc] 0130   catchable-type array UNREADABLE\n" );
++                    }
++                    else ERR( "[exc] 0130   ThrowInfo UNREADABLE at %p\n", (void *)ti );
++                    if (!NtReadVirtualMemory( GetCurrentProcess(), (void *)obj, ob, sizeof(ob), &got ) && got == sizeof(ob))
++                    {
++                        ERR( "[exc] 0130   object: %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx\n",
++                             (unsigned long long)ob[0], (unsigned long long)ob[1], (unsigned long long)ob[2], (unsigned long long)ob[3],
++                             (unsigned long long)ob[4], (unsigned long long)ob[5], (unsigned long long)ob[6], (unsigned long long)ob[7] );
++                        for (k = 1; k < 4; k++)
++                            if (ob[k] > 0x10000 && ob[k] < 0x800000000000ULL)
++                                ios_exc_dump_str( k == 1 ? "what() / first string" : "string at object+8*k", (ULONG_PTR)ob[k], 200, 0 );
++                    }
++                    else ERR( "[exc] 0130   object UNREADABLE at %p\n", (void *)obj );
++                }
++
+                 if (rec->ExceptionCode == 0x20474343 && rec->NumberParameters >= 1)
+                 {
+                     ULONG_PTR ue = rec->ExceptionInformation[0];

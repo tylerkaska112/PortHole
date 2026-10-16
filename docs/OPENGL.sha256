@@ -1,0 +1,16 @@
+58604a126af6a671ea390ee3d5b3e42228aa59b2858fb7af1d5b20b31739ccbb  ./licenses/cereal-BSD-3-Clause.txt
+cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  ./licenses/MoltenVK-Apache-2.0.txt
+6cda3076a8c09b31bb1f90da614ea89e7ee194589626eeac613e522849604e47  ./licenses/LuaJIT-MIT.txt
+cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  ./licenses/SPIRV-Cross-Apache-2.0.txt
+cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  ./licenses/SPIRV-Tools-Apache-2.0.txt
+0d1a0472ecc81830e75c20d59b0ea02841e3db21255e0ebad97ab682c54d6615  ./licenses/Mesa-license.rst
+30953492752a2ad2001a6f92e0b350b59b645a6bfc187492007f97d3f3043ef2  ./gl/libOSMesa.version
+776f688d781a96e4b5745c7ad853dd0bce2371884cb4b309383b826e19efe1fb  ./gl/libOSMesa.dylib
+203f726f561018594f358ba49b62bef2aabba523361280e63ae306c9ca5ced77  ./gl/README.md
+7c9cae6bf8bbf19b8c7453e426bc6bcaac12a426555233c68ec2d74c31f6bead  ./gl/libMoltenVK.dylib
+9644acabc34c03a446400421f0afe35e64e573bac3778be2da229798d176a8e4  ./gl/libMoltenVK.version
+0f5dea03a3d25f4ed32ac6225892a2dd2291239757dd7286edbceb744c8af017  ./compat/love/lua51.dll
+6f588bc0f20513f058ad7490e05be55503da02d4a501cda6ed3a718fe98eafaa  ./compat/love/README.md
+68ab221a0172c81f17ac82e58d481329ef83a45ae19d3015bb6d73ea4d10d0d6  ./compat/love/lua51.dll.version
+9ea9c3dc81dbffa09122012c69ceedfd26ea5dcd3c399f266e304e128052842f  ec-out/opengl32.dll
+a18bc51b9929094ef10acfd60b6aef63adff6cc662501091da7e3c92bbebd2fb  ec-out-i386/opengl32.dll

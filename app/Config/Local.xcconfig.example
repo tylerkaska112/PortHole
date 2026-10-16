@@ -1,0 +1,10 @@
+// Copy to Local.xcconfig (it is ignored by git) and fill in. Run `xcodegen generate` afterwards.
+PORTHOLE_BUNDLE_ID = com.example.porthole
+PORTHOLE_KEYCHAIN_SERVICE = com.example.porthole.secrets
+PORTHOLE_STORAGE_FOLDER = Porthole
+// The update / compatibility server. It is compiled into the build and shown nowhere in the app. Leave it empty to build without one.
+PORTHOLE_HUB_URL = https:/$()/hub.example.com:9445
+PORTHOLE_SOURCE_URL = https:/$()/github.com/example/porthole
+PORTHOLE_HUB_APP_ID = porthole
+// The maintainer's release public key (base64; `swift tools/release_sign.swift public`). With it, the app installs only updates signed by the matching private key.
+PORTHOLE_RELEASE_KEY =

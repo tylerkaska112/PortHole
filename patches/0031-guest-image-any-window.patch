@@ -1,0 +1,24 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -11895,7 +11895,11 @@
+     struct file_view *view;
+ 
+     if (!ios_guest_image_write_enabled()) return 0;
+-    if (!ios_wow_in_window( base )) return 0;
++    /* Porthole 0031: ANY guest window, not only the caller's. When a 32-bit process starts another, the image views of the
++     * child are mapped and protected from the parent's side, where ios_wow_in_window() (the CALLER's window) said no, so every
++     * i386 image of a child went to the JIT pool as a copy nothing runs: ~230 MB per run for Ubisoft Connect's processes,
++     * and `JIT pool exhausted` on its 196 MB libcef.dll. */
++    if (!ios_wow_in_window( base ) && !ios_wow_addr_in_any_window( base )) return 0;
+     if (!(view = find_view( base, size ))) return 0;
+     return (view->protect & SEC_IMAGE) != 0;
+ #else
+@@ -11940,7 +11944,7 @@
+ 
+     if (!ios_x64_image_data_enabled()) return 0;
+     if (!arm64ec_view) return 0;                      /* only an ARM64EC session runs x64 code through the emulator */
+-    if (ios_wow_in_window( base )) return 0;          /* i386: ios_guest_image_is_host_data */
++    if (ios_wow_in_window( base ) || ios_wow_addr_in_any_window( base )) return 0;   /* i386: ios_guest_image_is_host_data */
+     if (!(view = find_view( base, size ))) return 0;
+     if (!(view->protect & SEC_IMAGE)) return 0;
+     b = (uintptr_t)view->base;

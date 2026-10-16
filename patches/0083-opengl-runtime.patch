@@ -1,0 +1,140 @@
+diff -ru a/app/Runtime/IOSDisplayShim.h b/app/Runtime/IOSDisplayShim.h
+--- a/app/Runtime/IOSDisplayShim.h
++++ b/app/Runtime/IOSDisplayShim.h
+@@ -18,6 +18,8 @@
+ 
+ // Posted (on the main queue) when the guest's virtual monitor changes size.
+ extern NSString * const MadeiraDisplayModeChangedNotification;
++// The CAMetalLayer an HWND's D3D or GL output goes to (unretained).
++CAMetalLayer *madeira_display_layer_for_hwnd(void *hwnd);
+ #endif
+ 
+ // The guest's virtual-monitor size in guest pixels, for the front end's
+diff -ru a/app/Runtime/IOSDisplayShim.m b/app/Runtime/IOSDisplayShim.m
+--- a/app/Runtime/IOSDisplayShim.m
++++ b/app/Runtime/IOSDisplayShim.m
+@@ -187,29 +187,36 @@
+     (void)d;
+ }
+ 
++// The layer an HWND presents to. Desktop mode: per-window layer in the
++// desktop compositor. Game mode: the fullscreen singleton. Shared by DXMT
++// (below) and the OpenGL presenter (Winios/WiniosGL.m).
++CAMetalLayer *madeira_display_layer_for_hwnd(void *hwnd) {
++    if (madeira_desktop_mode()) {
++        CAMetalLayer *layer = winios_metal_layer_for_hwnd(hwnd);
++        if (!layer)
++            NSLog(@"[madeira-display] desktop metal layer creation failed for hwnd=%p", hwnd);
++        return layer;
++    }
++    pthread_mutex_lock(&g_lock);
++    CAMetalLayer *layer = g_layer;
++    pthread_mutex_unlock(&g_lock);
++    if (!layer)
++        NSLog(@"[madeira-display] metal layer requested before one was registered!");
++    return layer;
++}
++
+ // The critical two: return a "view" handle that maps to the CAMetalLayer.
+ // We pack the layer pointer directly. `v` carries the swapchain's HWND
+-// (see my_get_win_data). Desktop mode: per-window layer in the desktop
+-// compositor. Game mode: the fullscreen singleton, exactly as before.
++// (see my_get_win_data).
+ static macdrv_metal_view my_view_create_metal_view(macdrv_view v, macdrv_metal_device d) {
+     (void)d;
+     winios_note_swapchain_hwnd((void *)v);
++    CAMetalLayer *layer = madeira_display_layer_for_hwnd((void *)v);
++    if (!layer) return NULL;
+     if (madeira_desktop_mode()) {
+-        CAMetalLayer *layer = winios_metal_layer_for_hwnd((void *)v);
+-        if (!layer) {
+-            NSLog(@"[madeira-display] desktop metal layer creation failed for hwnd=%p", (void *)v);
+-            return NULL;
+-        }
+         fprintf(stderr, "[madeira-display] desktop metal view for hwnd=%p layer=%p\n", (void *)v, layer);
+         fflush(stderr);
+         return (macdrv_metal_view)CFBridgingRetain(layer);
+-    }
+-    pthread_mutex_lock(&g_lock);
+-    CAMetalLayer *layer = g_layer;
+-    pthread_mutex_unlock(&g_lock);
+-    if (!layer) {
+-        NSLog(@"[madeira-display] view_create_metal_view called before layer registered!");
+-        return NULL;
+     }
+     winios_note_game_metal_hwnd((void *)v);
+     return (macdrv_metal_view)CFBridgingRetain(layer);
+diff -ru a/app/Runtime/WineProcessBridge.m b/app/Runtime/WineProcessBridge.m
+--- a/app/Runtime/WineProcessBridge.m
++++ b/app/Runtime/WineProcessBridge.m
+@@ -927,6 +927,33 @@
+          * so the next log proves it arrived rather than leaving us to infer it. */
+         setenv("FNA3D_FORCE_DRIVER", "D3D11", 0);
+ 
++        /* OpenGL backend for the winios GL driver (build/win32u-unix/opengl_ios.c):
++         *   zink - desktop OpenGL 3.3-4.x: Mesa OSMesa + Zink on MoltenVK, from the
++         *          bundle's gl/ folder (build/mesa-ios, build/moltenvk-ios)
++         *   gles - Apple's OpenGL ES 3.0 (EAGL); desktop-GL-only apps fail
++         * madeira.cfg `gl-backend = zink|gles` chooses; otherwise zink when its
++         * dylibs are bundled. MADEIRA_GL_BACKEND in the environment wins over both.
++         * The driver falls back to gles by itself if Zink cannot start. */
++        {
++            NSString *glDir = [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"gl"];
++            BOOL haveZink = [[NSFileManager defaultManager] fileExistsAtPath:
++                                [glDir stringByAppendingPathComponent:@"libOSMesa.dylib"]];
++            char glb[16] = "";
++            if (!madeira_cfg_get("gl-backend", glb, sizeof glb) || !glb[0])
++                strlcpy(glb, haveZink ? "zink" : "gles", sizeof glb);
++            setenv("MADEIRA_GL_BACKEND", glb, 0);
++            setenv("MADEIRA_GL_DIR", glDir.UTF8String, 1);
++            LOG("OpenGL backend: %{public}s (zink bundled: %d)", getenv("MADEIRA_GL_BACKEND"), haveZink);
++
++            /* With the GLES backend there is no desktop GL context, so make LOVE ask
++             * for OpenGL ES first. LOVE 11 checks this SDL hint (read from the
++             * environment) before trying desktop GL; SDL then creates the context
++             * through WGL_EXT_create_context_es2_profile, which that backend
++             * advertises. overwrite=0: an explicit setting still wins. */
++            if (!strcmp(getenv("MADEIRA_GL_BACKEND"), "gles"))
++                setenv("LOVE_GRAPHICS_USE_OPENGLES", "1", 0);
++        }
++
+         /* ml720: make Mono report unhandled exceptions and assembly-load failures.
+          *
+          * DIAGNOSTIC — revisit before shipping; this is chatty and costs startup time.
+@@ -975,11 +1002,34 @@
+             if (aerr) LOG("AVAudioSession setCategory failed: %{public}s",
+                           aerr.localizedDescription.UTF8String);
+             aerr = nil;
++            /* A short I/O buffer. iOS's default hands the render callback about
++             * 1024 frames (~21 ms) a pass. A WASAPI client that refills one period
++             * at a time (SDL's backend writes 10 ms whenever 10 ms or less is
++             * queued) never has that much queued, so every pass came up short and
++             * the game's sound had a gap every pass (a client delivered 93.6% of its
++             * audio). 5 ms passes fit inside one period. env.MADEIRA_AUDIO_IO_MS
++             * (1..40) chooses another length; 0 keeps iOS's default. Bluetooth
++             * outputs may still use longer buffers. */
++            {
++                char iov[16] = "";
++                const char *ioe = getenv("MADEIRA_AUDIO_IO_MS");
++                if (ioe) strlcpy(iov, ioe, sizeof iov);
++                else madeira_cfg_get("env.MADEIRA_AUDIO_IO_MS", iov, sizeof iov);
++                int io_ms = 0;   /* Porthole: opt-in (env.MADEIRA_AUDIO_IO_MS = 5); the fork this came from defaults to 5 ms for every game */
++                if (iov[0] == '0' && !iov[1]) io_ms = 0;
++                else if (iov[0] && atoi(iov) >= 1 && atoi(iov) <= 40) io_ms = atoi(iov);
++                if (io_ms) {
++                    [session setPreferredIOBufferDuration:io_ms / 1000.0 error:&aerr];
++                    if (aerr) LOG("AVAudioSession setPreferredIOBufferDuration(%d ms) failed: %{public}s",
++                                  io_ms, aerr.localizedDescription.UTF8String);
++                    aerr = nil;
++                }
++            }
+             [session setActive:YES error:&aerr];
+             if (aerr) LOG("AVAudioSession setActive failed: %{public}s",
+                           aerr.localizedDescription.UTF8String);
+-            else LOG("AVAudioSession active: rate=%.0f latency=%.1fms",
+-                     session.sampleRate, session.outputLatency * 1000.0);
++            else LOG("AVAudioSession active: rate=%.0f latency=%.1fms io-buffer=%.1fms",
++                     session.sampleRate, session.outputLatency * 1000.0, session.IOBufferDuration * 1000.0);
+         }
+ 
+         /* 2026-07-04 BISECT RESULT: arm A (this env set, all handler fixes

@@ -1,0 +1,3 @@
+[submodule "vendor/Madeira"]
+	path = vendor/Madeira
+	url = https://github.com/willfaust/Madeira.git

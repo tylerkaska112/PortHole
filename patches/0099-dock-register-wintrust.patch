@@ -1,0 +1,16 @@
+--- a/app/Runtime/DockInstallers.swift
++++ b/app/Runtime/DockInstallers.swift
+@@ -365,6 +365,13 @@
+             lines.append("\"" + executable.replacingOccurrences(of: "\"", with: "") + "\" --start-services" + result)
+             lines.append("if not \"%ERRORLEVEL%\"==\"0\" echo services failed" + result)
+         }
++        // Porthole 0099: a prefix made without wine.inf never had wintrust.dll registered, so CryptDecodeObjectEx had no decoder for the Authenticode
++        // structures (1.3.6.1.4.1.311.2.1.4 and friends) and a program that checks the signature of its own libraries (Rockstar's launcher checking
++        // socialclub.dll) said "incomplete installation (1002)". Registering is idempotent and quick; it only runs with the service step.
++        if services != .off {
++            lines.append("C:\\windows\\system32\\regsvr32.exe /s wintrust.dll")
++            lines.append("echo wintrust-registered %ERRORLEVEL%" + result)
++        }
+         for (offset, process) in processes.enumerated() {
+             let index = offset + 1
+             let quoted = "\"" + process.executable + "\""

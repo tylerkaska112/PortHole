@@ -1,0 +1,45 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -15788,16 +15788,34 @@
+  * on purpose). The JIT pool stays excluded either way. */
+ static int ios_swap_fex_arena_ok( void )
+ {
+-    static int on = -1;
+-    if (on < 0)
++    /* Porthole 0079: MADEIRA_SWAP_FEX = 1 backs the arena from the start (0073); = auto backs it only once the app's footprint reaches
++     * MADEIRA_SWAP_FEX_AT_MB (default 3000 MB): everything allocated before that runs at full speed, and what the emulator allocates afterwards (a server
++     * world joining, new threads, new translated code) goes to the file, so the memory the game needs next does not push the app over iOS's limit.
++     * The footprint is the figure the pool warmer publishes every 250 ms (ios_last_footprint_mb); nothing is measured here. The switch is one-way. */
++    static int mode = -1, tripped;
++    static unsigned long long at_mb = 3000;
++    if (mode < 0)
+     {
+-        const char *e = getenv( "MADEIRA_SWAP_FEX" );
+-        on = e && e[0] == '1' && ios_swap_wide;
+-        if (e && e[0] == '1')
+-            dprintf( 2, "[swap] 0073 FEX arena %s the file-backed tier (MADEIRA_SWAP_FEX=1, coverage=%s)\n",
+-                     on ? "joins" : "stays out of (needs coverage wide)", ios_swap_mode );
++        const char *e = getenv( "MADEIRA_SWAP_FEX" ), *at = getenv( "MADEIRA_SWAP_FEX_AT_MB" );
++        mode = ios_swap_wide && e ? (e[0] == '1' ? 1 : !strcmp( e, "auto" ) ? 2 : 0) : 0;
++        if (at && strtoull( at, NULL, 10 ) >= 512) at_mb = strtoull( at, NULL, 10 );
++        if (e && (e[0] == '1' || !strcmp( e, "auto" )))
++            dprintf( 2, "[swap] 0073/0079 FEX arena %s the file-backed tier (MADEIRA_SWAP_FEX=%s, coverage=%s%s)\n",
++                     mode == 1 ? "joins" : mode == 2 ? "joins, from the footprint threshold on," : "stays out of (needs coverage wide)", e, ios_swap_mode,
++                     mode == 2 ? ", at MADEIRA_SWAP_FEX_AT_MB" : "" );
++        if (mode == 2) dprintf( 2, "[swap] 0079 auto: the arena joins once the app footprint reaches %llu MB\n", at_mb );
+     }
+-    return on;
++    if (mode == 1) return 1;
++    if (mode == 2)
++    {
++        if (!tripped && ios_last_footprint_mb >= at_mb)
++        {
++            tripped = 1;
++            dprintf( 2, "[swap] 0079 auto: app footprint %llu MB >= %llu MB, the emulator's arena goes to the file from now on\n", ios_last_footprint_mb, at_mb );
++        }
++        return tripped;
++    }
++    return 0;
+ }
+ static int ios_swap_is_fexjit( uintptr_t b, size_t size )
+ {

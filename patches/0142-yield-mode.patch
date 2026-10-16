@@ -1,0 +1,42 @@
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -65,6 +65,10 @@
+ # include <linux/ntsync.h>
+ #endif
+ 
++#ifdef WINE_IOS
++#include <mach/mach.h>
++#include <mach/thread_switch.h>
++#endif
+ #include "ntstatus.h"
+ #include "windef.h"
+ #include "winternl.h"
+@@ -3611,6 +3615,28 @@
+             __sync_fetch_and_add( &ios_xp_yield_slept, 1 );
+             usleep( (useconds_t)ios_ysleep );
+             return STATUS_SUCCESS;
++        }
++    }
++#endif
++#ifdef WINE_IOS
++    /* 0141: sched_yield is swtch_pri on iOS: the thread is depressed and waits until the other runnable threads have had a turn. On a phone whose cores are all busy
++     * that is milliseconds per call (a profile of a game: half of all looks were threads inside swtch_pri, 845 yields/s, each thread at 99 % in it), and a game that
++     * waits for work with SwitchToThread sleeps through the work arriving. madeira.cfg `yield-mode` (engine line `yield-mode = N`):
++     *   0 sched_yield as before (default), 1 thread_switch(NONE): give the core up only to a thread that wants it, no depression,
++     *   2 no yield at all (the caller spins), 3 sleep 50 us. */
++    {
++        static long long ios_ymode = -1;
++        if (ios_ymode < 0)
++        {
++            ios_ymode = madeira_cfg_int( "yield-mode", 0 );
++            if (ios_ymode) fprintf( stderr, "[sync-census] 0141 yield-mode=%lld\n", ios_ymode );
++        }
++        switch (ios_ymode)
++        {
++        case 1: thread_switch( MACH_PORT_NULL, SWITCH_OPTION_NONE, 0 ); return STATUS_SUCCESS;
++        case 2: return STATUS_NO_YIELD_PERFORMED;
++        case 3: usleep( 50 ); return STATUS_SUCCESS;
++        default: break;
+         }
+     }
+ #endif

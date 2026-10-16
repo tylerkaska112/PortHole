@@ -1,0 +1,232 @@
+diff --git a/build/ntdll-unix/audio_null_ios.c b/build/ntdll-unix/audio_null_ios.c
+index 944c0d6..ed09398 100644
+--- a/build/ntdll-unix/audio_null_ios.c
++++ b/build/ntdll-unix/audio_null_ios.c
+@@ -355,6 +355,11 @@ struct ios_stream {
+     BYTE *ring;
+     _Atomic uint64_t write_pos;  /* frames produced by the game (monotonic) */
+     _Atomic uint64_t play_pos;   /* frames consumed by the RT callback */
++    UINT32 cushion_frames;       /* f4-0006: jitter cushion, see ios_audio_cushion_ms() */
++    int primed_once;             /* writer side: the start-of-stream silence prime was queued */
++    int rt_primed;               /* RT side: the queue has reached the cushion at least once */
++    int rt_recover;              /* RT side: queue is low, play slightly slower until the cushion is back */
++    double rt_frac;              /* RT side: fractional read position while recovering */
+ };
+ 
+ /* ml739: one stream object per client, mirroring Wine's CoreAudio driver.
+@@ -639,6 +644,25 @@ static void ios_build_mix_gains(struct ios_stream *s, UINT32 mask)
+         s->mix_gain[c][0] = s->mix_gain[c][1] = 0.5f;
+ }
+ 
++/* f4-0006: JITTER CUSHION.
++ * SDL's WASAPI backend (what Factorio uses) keeps only ~1 device period (10 ms) queued: it writes one period each time the padding drops to
++ * one period. Under FEX/Wine the audio thread is regularly woken >10-20 ms late, the ring runs dry and the output glitches. We therefore
++ * (1) prime the ring with `cushion` frames of silence whenever it is empty when the client writes (start, or after an underrun) and
++ * (2) report padding MINUS the cushion, so the client still sees a ~10 ms queue and keeps refilling at its normal pace.
++ * Cost: `cushion` of extra latency. MADEIRA_AUDIO_CUSHION_MS (default 80, 0 = off, max 400). */
++static UINT32 ios_audio_cushion_ms(void) {
++    static int ms = -1;
++    if (ms < 0) {
++        const char *e = getenv("MADEIRA_AUDIO_CUSHION_MS");
++        ms = e && *e ? atoi(e) : 80;
++        if (ms < 0) ms = 0;
++        if (ms > 400) ms = 400;
++    }
++    return (UINT32)ms;
++}
++/* Underrun accounting, written by the RT callback (relaxed atomics only) and printed from timer_loop. */
++static _Atomic uint64_t g_a_mix_calls, g_a_underruns, g_a_short_frames, g_a_primes, g_a_recoveries;
++
+ /* ------------------- Tier-2: RemoteIO real output ------------------- */
+ 
+ /* Core Audio real-time thread. Ring + atomics ONLY — no Wine calls, no
+@@ -648,6 +672,34 @@ static void ios_build_mix_gains(struct ios_stream *s, UINT32 mask)
+  * atomics only -- no locks, no allocation, no logging, no Wine calls.
+  * Underrun mixes what is there and leaves the rest alone, which is
+  * WASAPI-correct: padding drains to 0 and the position clock pauses. */
++/* Fold one client frame (every channel) into the stereo bus with the gains ios_build_mix_gains chose. */
++static inline void ios_frame_lr(const struct ios_stream *s, const BYTE *fr, UINT32 mch, float *lo, float *ro)
++{
++    float l = 0.0f, r = 0.0f;
++    UINT32 c;
++    for (c = 0; c < mch; c++) {
++        float v;
++        if (s->is_float) {
++            memcpy(&v, fr + (size_t)c * 4, 4);
++        } else if (s->sample_bits == 16) {
++            int16_t i16;
++            memcpy(&i16, fr + (size_t)c * 2, 2);
++            v = (float)i16 * (1.0f / 32768.0f);
++        } else {   /* 32-bit signed integer */
++            int32_t i32;
++            memcpy(&i32, fr + (size_t)c * 4, 4);
++            v = (float)i32 * (1.0f / 2147483648.0f);
++        }
++        l += v * s->mix_gain[c][0];
++        r += v * s->mix_gain[c][1];
++    }
++    *lo = l; *ro = r;
++}
++
++/* f4-0006: while the queue is below the cushion, read it at this fraction of normal speed (about -0.9 semitone) so it refills WITHOUT inserting silence. */
++#define IOS_RECOVER_STEP_SOFT 0.97    /* queue between 1/4 and 3/4 of the cushion: about half a semitone slow */
++#define IOS_RECOVER_STEP_HARD 0.95    /* queue almost empty: refill fast */
++
+ static void ios_mix_stream(struct ios_stream *s, float *out, UInt32 nframes,
+                            UINT32 dev_ch, UINT32 dev_rate)
+ {
+@@ -661,43 +713,60 @@ static void ios_mix_stream(struct ios_stream *s, float *out, UInt32 nframes,
+     play  = atomic_load_explicit(&s->play_pos, memory_order_relaxed);
+     wr    = atomic_load_explicit(&s->write_pos, memory_order_acquire);
+     avail = wr - play;
++    atomic_fetch_add_explicit(&g_a_mix_calls, 1, memory_order_relaxed);
++
++    /* Recovery state machine (RT thread only). Enter when a stall has drained the queue below 3/4 of the cushion, leave when it is back. */
++    if (s->cushion_frames && s->sample_rate == dev_rate) {
++        if (!s->rt_primed) { if (avail >= s->cushion_frames) s->rt_primed = 1; }
++        else if (!s->rt_recover && avail < (s->cushion_frames * 3) / 4) { s->rt_recover = 1; s->rt_frac = 0.0; atomic_fetch_add_explicit(&g_a_recoveries, 1, memory_order_relaxed); }
++        else if (s->rt_recover && avail >= s->cushion_frames) s->rt_recover = 0;
++    }
++
++    if (s->rt_recover && s->sample_rate == dev_rate) {
++        /* Slow read with linear interpolation between neighbouring frames; needs frame i+1 to exist. */
++        double pos = s->rt_frac;
++        const double step = avail < s->cushion_frames / 4 ? IOS_RECOVER_STEP_HARD : IOS_RECOVER_STEP_SOFT;
++        for (f = 0; f < nframes; f++) {
++            uint64_t i = (uint64_t)pos;
++            float l0, r0, l1, r1, t = (float)(pos - (double)i);
++            if (i + 1 >= avail) {
++                atomic_fetch_add_explicit(&g_a_underruns, 1, memory_order_relaxed);
++                atomic_fetch_add_explicit(&g_a_short_frames, nframes - f, memory_order_relaxed);
++                break;
++            }
++            ios_frame_lr(s, s->ring + (size_t)((play + i) % cap) * fb, mch, &l0, &r0);
++            ios_frame_lr(s, s->ring + (size_t)((play + i + 1) % cap) * fb, mch, &l1, &r1);
++            out[(size_t)f * dev_ch + 0] += l0 + (l1 - l0) * t;
++            if (dev_ch > 1) out[(size_t)f * dev_ch + 1] += r0 + (r1 - r0) * t;
++            pos += step;
++        }
++        {
++            uint64_t used = (uint64_t)pos;
++            if (used > avail) used = avail;
++            s->rt_frac = pos - (double)(uint64_t)pos;
++            atomic_store_explicit(&s->play_pos, play + used, memory_order_release);
++        }
++        return;
++    }
+ 
+     /* frames of THIS stream that cover nframes of device time */
+     if (s->sample_rate == dev_rate) need = nframes;
+     else need = ((uint64_t)nframes * s->sample_rate + dev_rate - 1) / dev_rate;
+-    if (avail < need) need = avail;
++    if (avail < need) {
++        atomic_fetch_add_explicit(&g_a_underruns, 1, memory_order_relaxed);
++        atomic_fetch_add_explicit(&g_a_short_frames, need - avail, memory_order_relaxed);
++        need = avail;
++    }
+ 
+     for (f = 0; f < nframes; f++)
+     {
+         uint64_t sidx = (s->sample_rate == dev_rate)
+                         ? (uint64_t)f
+                         : ((uint64_t)f * s->sample_rate) / dev_rate;
+-        const BYTE *fr;
+-        float l = 0.0f, r = 0.0f;
+-        UINT32 c;
++        float l, r;
+ 
+         if (sidx >= need) break;
+-        fr = s->ring + (size_t)((play + sidx) % cap) * fb;
+-
+-        /* Fold every client channel into the stereo bus with the gains
+-         * ios_build_mix_gains chose at create_stream. */
+-        for (c = 0; c < mch; c++) {
+-            float v;
+-            if (s->is_float) {
+-                memcpy(&v, fr + (size_t)c * 4, 4);
+-            } else if (s->sample_bits == 16) {
+-                int16_t i16;
+-                memcpy(&i16, fr + (size_t)c * 2, 2);
+-                v = (float)i16 * (1.0f / 32768.0f);
+-            } else {   /* 32-bit signed integer */
+-                int32_t i32;
+-                memcpy(&i32, fr + (size_t)c * 4, 4);
+-                v = (float)i32 * (1.0f / 2147483648.0f);
+-            }
+-            l += v * s->mix_gain[c][0];
+-            r += v * s->mix_gain[c][1];
+-        }
+-
++        ios_frame_lr(s, s->ring + (size_t)((play + sidx) % cap) * fb, mch, &l, &r);
+         out[(size_t)f * dev_ch + 0] += l;
+         if (dev_ch > 1) out[(size_t)f * dev_ch + 1] += r;
+     }
+@@ -1112,6 +1181,9 @@ static NTSTATUS ios_create_stream(void *args) {
+      * 100ms so a slow FEX-translated mixer has slack. */
+     dur_frames = (uint64_t)(p->duration > 0 ? p->duration : 0) * s->sample_rate / 10000000ull;
+     if (dur_frames < s->sample_rate / 10) dur_frames = s->sample_rate / 10;
++    s->cushion_frames = (UINT32)((uint64_t)ios_audio_cushion_ms() * s->sample_rate / 1000);
++    /* f4-0006: room for the cushion plus ~300 ms of client data */
++    if (dur_frames < (uint64_t)s->cushion_frames + s->sample_rate * 3 / 10) dur_frames = (uint64_t)s->cushion_frames + s->sample_rate * 3 / 10;
+     if (dur_frames > s->sample_rate * 4) dur_frames = s->sample_rate * 4;
+     s->buffer_frames = (UINT32)dur_frames;
+     free(s->ring);
+@@ -1210,6 +1282,7 @@ static NTSTATUS ios_reset(void *args) {
+     atomic_store(&s->write_pos, 0);
+     atomic_store(&s->play_pos, 0);
+     s->pending_frames = 0;
++    s->primed_once = 0; s->rt_primed = 0; s->rt_recover = 0; s->rt_frac = 0.0;
+     p->result = S_OK;
+     return STATUS_SUCCESS;
+ }
+@@ -1222,10 +1295,21 @@ static NTSTATUS ios_timer_loop(void *args) {
+     struct ios_stream *s = stream_from_handle(p->stream);
+     if (!s) return STATUS_SUCCESS;
+     LOG_FN_CALL(9, "timer_loop");
++    uint64_t last_log = 0;
+     while (s->valid) {
+         usleep(10000); /* device period, 10 ms */
+         if (s->event && s->started)
+             NtSetEvent(s->event, NULL);
++        /* f4-0006: one line every ~10 s: how often the device ran dry (each is an audible glitch) */
++        if (s->started && ++last_log % 1000 == 0)
++            fprintf(stderr, "[ios_audio] f4-0006 cushion=%ums callbacks=%llu underruns=%llu short_frames=%llu primes=%llu recoveries=%llu padding_now=%lld\n",
++                    (unsigned)(s->sample_rate ? (uint64_t)s->cushion_frames * 1000 / s->sample_rate : 0),
++                    (unsigned long long)atomic_load_explicit(&g_a_mix_calls, memory_order_relaxed),
++                    (unsigned long long)atomic_load_explicit(&g_a_underruns, memory_order_relaxed),
++                    (unsigned long long)atomic_load_explicit(&g_a_short_frames, memory_order_relaxed),
++                    (unsigned long long)atomic_load_explicit(&g_a_primes, memory_order_relaxed),
++                    (unsigned long long)atomic_load_explicit(&g_a_recoveries, memory_order_relaxed),
++                    (long long)(atomic_load(&s->write_pos) - atomic_load(&s->play_pos)));
+     }
+     return STATUS_SUCCESS;
+ }
+@@ -1281,6 +1365,20 @@ static NTSTATUS ios_release_render_buffer(void *args) {
+         uint64_t wr = atomic_load_explicit(&s->write_pos, memory_order_relaxed);
+         UINT32 i = 0;
+         if (n > s->pending_frames) n = s->pending_frames;
++        /* f4-0006: ring empty at the START of the stream -> queue the cushion of silence first. After a later stall the mixer rebuilds the cushion by slow playback instead (no silence). */
++        if (s->cushion_frames && s->started && !s->primed_once && wr == atomic_load_explicit(&s->play_pos, memory_order_acquire)) {
++            s->primed_once = 1;
++            UINT32 cush = s->cushion_frames, k = 0;
++            if ((uint64_t)cush + n > cap) cush = cap > n ? cap - n : 0;
++            while (k < cush) {
++                UINT32 idx = (UINT32)((wr + k) % cap), chunk = cap - idx;
++                if (chunk > cush - k) chunk = cush - k;
++                memset(s->ring + (size_t)idx * fb, 0, (size_t)chunk * fb);
++                k += chunk;
++            }
++            wr += cush;
++            atomic_fetch_add_explicit(&g_a_primes, 1, memory_order_relaxed);
++        }
+         if (p->flags & 0x2 /* AUDCLNT_BUFFERFLAGS_SILENT */)
+             memset(s->render_scratch, 0, (size_t)n * fb);
+         while (i < n) {
+@@ -1429,6 +1527,7 @@ static NTSTATUS ios_get_current_padding(void *args) {
+     if (p->padding) {
+         if (ios_stream_is_live(s)) {
+             uint64_t pad = atomic_load(&s->write_pos) - atomic_load(&s->play_pos);
++            pad = pad > s->cushion_frames ? pad - s->cushion_frames : 0;   /* f4-0006: hide the cushion from the client */
+             *p->padding = (UINT32)(pad > s->buffer_frames ? s->buffer_frames : pad);
+         } else {
+             *p->padding = 0; /* null-mode: always hungry */

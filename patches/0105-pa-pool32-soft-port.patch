@@ -1,0 +1,358 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-11 22:10:05
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-11 22:10:05
+@@ -1395,7 +1395,8 @@
+  * guest is told it got the full 8GB — the top 64KB overlaps only PA's
+  * never-committed forbidden zone, and a stray commit there is absorbed by an
+  * ios_soft tail entry. */
+-#define IOS_CAGE_BASE      0x7200000000ULL
++static ULONG_PTR ios_cage_base_v = 0x7200000000ULL;   /* patch 0018 moves it to 0x7600000000 */
++#define IOS_CAGE_BASE      ios_cage_base_v
+ #define IOS_CAGE_REAL_SIZE 0x1ffff0000ULL   /* 8GB - 64KB */
+ static int ios_cage_holdback_live;
+ /* Set only after the lower window is carved. The unregistered PROT_NONE
+@@ -1416,6 +1417,18 @@
+ }
+ 
+ /* Is this 16GB-aligned slot free of any pool we already handed out? */
++/* Porthole patch 0018: madeira.cfg pa-pool32-soft = 1 (per game through its own madeira.cfg lines). Off unless set. */
++static int ios_pa32_soft_enabled( void )
++{
++    static int cached = -1;
++    if (cached < 0)
++    {
++        const char *e = getenv( "MADEIRA_PA_POOL32_SOFT" );     /* set by the app for games that need it (GameFixes) */
++        cached = ((e && *e == '1') || madeira_cfg_int( "pa-pool32-soft", 0 )) ? 1 : 0;
++    }
++    return cached;
++}
++
+ static int ios_soft_slot_taken( uint64_t slot )
+ {
+     unsigned i;
+@@ -1437,6 +1450,68 @@
+ 
+ static void ios_bigres_note( void *base, size_t size );   /* defined below */
+ 
++/* Porthole patch 0018 (opt-in: madeira.cfg pa-pool32-soft = 1): serve V8's last-resort sandbox size from the cage holdback.
++ *
++ * Electron's V8 reserves its sandbox by halving the size until a reservation works (1.1TB, 512GB, 256GB ... 8GB, in the field log), asks for each through
++ * VirtualAlloc2 (NtAllocateVirtualMemoryEx) and retries without a hint. The engine's 8GB cage grant lives only in the hinted retry of the plain
++ * NtAllocateVirtualMemory, which is where CEF's V8 comes in, so neither the Ex request nor the unhinted retry ever reached it, the 8GB step failed
++ * like all the others and V8 crashed in its sandbox initialisation. This applies the same grant at the end of both entry points: the exact 8GB
++ * MEM_RESERVE ask, when the boot holdback [0x7200000000, +8GB-64KB) is still unclaimed. Returns STATUS_SUCCESS only if the range was granted. */
++static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect,
++                                         ULONG_PTR limit_low, ULONG_PTR limit_high,
++                                         ULONG_PTR align, ULONG attributes );
++struct file_view;
++static struct file_view *find_view( const void *addr, size_t size );
++/* Oilpan's (cppgc's) caged heap (V8, Electron): exactly 32GB aligned to 32GB, four tries, then "Fatal process out of memory: Oilpan: CagedHeap reservation".
++ * Disassembled from the game: it then builds its heap only in the FIRST 4GB of that reservation (age table, then a bounded page allocator over base+1MB..base+4GB);
++ * the other 28GB is address space it claims and never touches. The top 64GB of the address space holds two 32GB-aligned slots; the allocator's pool (PartitionAlloc, asked
++ * first) takes [0x7800000000,0x8000000000). So the second ask gets [0x7000000000,0x8000000000-32GB), reported as 32GB, with a REAL view only over its first 4GB.
++ * Everything else that lives in that slot (the JIT pool alias, the furniture window, the emulator's band, V8's 8GB sandbox) sits above the 4GB, inside address space
++ * Oilpan claims but never uses. See patches/0018-pa-pool32-soft.md. */
++#define IOS_PA32_OILPAN_BASE 0x7000000000ULL
++#define IOS_PA32_OILPAN_REAL 0x100000000ULL
++static int ios_pa32_oilpan_hold;
++static NTSTATUS ios_pa32_cage_grant( HANDLE process, PVOID *ret, SIZE_T *size_ptr, SIZE_T req_size, ULONG type, ULONG protect )
++{
++    SIZE_T csz = IOS_CAGE_REAL_SIZE;
++    void *pick = (void *)(uintptr_t)IOS_CAGE_BASE;
++    NTSTATUS st;
++
++    if (process == NtCurrentProcess() && req_size == 0x800000000ULL && (type & MEM_RESERVE)
++        && ios_pa32_oilpan_hold && ios_pa32_soft_enabled() && find_view( (const void *)0x7800000000ULL, 0x1000 ))
++    {
++        csz = IOS_PA32_OILPAN_REAL; pick = (void *)(uintptr_t)IOS_PA32_OILPAN_BASE;
++        munmap( pick, csz );
++        ios_pa32_oilpan_hold = 0;
++        st = allocate_virtual_memory( &pick, &csz, type, protect, 0, 0, 0, 0 );
++        if (!st) { *ret = pick; *size_ptr = req_size; }   /* the real view is the first 4GB; the guest is told it has all 32GB */
++        dprintf( 2, "[pa32] patch0018 Oilpan caged-heap ask (32GB) served from the slot base -> %p real=0x%llx st=0x%x\n",
++                 pick, (unsigned long long)csz, (unsigned)st );
++        return st;
++    }
++    if (process != NtCurrentProcess() || req_size != 0x200000000ULL || !(type & MEM_RESERVE)
++        || !ios_cage_holdback_live || !ios_pa32_soft_enabled()) return STATUS_NO_MEMORY;
++    munmap( (void *)(uintptr_t)IOS_CAGE_BASE, IOS_CAGE_REAL_SIZE );
++    ios_cage_holdback_live = 0;
++    st = allocate_virtual_memory( &pick, &csz, type, protect, 0, 0, 0, 0 );
++    if (!st && (uintptr_t)pick == IOS_CAGE_BASE)
++    {
++        *ret = pick;
++        *size_ptr = req_size;   /* report the full 8GB; the real view is 64KB short, like the CEF grant */
++        if (ios_soft_n < IOS_SOFT_MAX)
++        {
++            ios_soft[ios_soft_n].base = IOS_CAGE_BASE + IOS_CAGE_REAL_SIZE;
++            ios_soft[ios_soft_n].size = 0x200000000ULL - IOS_CAGE_REAL_SIZE;
++            ios_soft[ios_soft_n].cage = 1;
++            ios_soft_n++;
++        }
++    }
++    else if (!st) { *ret = pick; *size_ptr = csz; }
++    dprintf( 2, "[pa32] patch0018 8GB sandbox/cage ask served from the holdback -> %p real=0x%llx st=0x%x\n",
++             pick, (unsigned long long)IOS_CAGE_REAL_SIZE, (unsigned)st );
++    return st;
++}
++
+ static void ios_jumbo_census( void *hint, size_t size, void *result, unsigned st )
+ {
+     /* ml131: report the 512MB-reservation census alongside every jumbo call —
+@@ -5918,7 +5993,7 @@
+ static inline ULONG_PTR ios_usable_va_floor_get(void)
+ {
+     size_t sz = ios_jit_pool_size_global;
+-    return (ULONG_PTR)0x7000000000ULL + (ULONG_PTR)(sz ? sz : (896ULL << 20));
++    return (ios_pa32_soft_enabled() ? (ULONG_PTR)0x7100000000ULL : (ULONG_PTR)0x7000000000ULL) + (ULONG_PTR)(sz ? sz : (896ULL << 20));   /* patch 0018: the alias sits above Oilpan's 4GB */
+ }
+ #define ios_usable_va_floor (ios_usable_va_floor_get())
+ 
+@@ -5954,7 +6029,18 @@
+  * demand at 3 x 16GB, and slots 0-2 (0x7000000000/0x7400000000/0x7800000000)
+  * cover exactly that, leaving [0x7C00000000, 0x8000000000) = 16GB for steering --
+  * enough for the ~14GB of 512MB reserves this workload makes. */
+-static const ULONG_PTR ios_steer_slot = 0x7C00000000;
++static ULONG_PTR ios_steer_slot = 0x7C00000000;
++/* Porthole patch 0018: with the emulator's band moved below the 32GB pool (pa-pool32-soft = 1), steered reserves live in that band and must not spill above it.
++ * 0 = no upper bound (the host ceiling), the default. */
++static ULONG_PTR ios_steer_top = 0;
++int ios_fex_band_relocated;
++static int ios_in_steer_band( uint64_t a ) { return a >= ios_steer_slot && (!ios_steer_top || a < ios_steer_top); }
++/* The emulator's host-memory band: [0x7c00000000,0x8000000000) unless patch 0018 moved it. Used by signal_arm64_ios.c. */
++int ios_fex_band_contains( unsigned long long a )
++{
++    if (ios_fex_band_relocated) return ios_fex_arena_base_unix && a >= ios_fex_arena_base_unix && a < ios_fex_arena_end_unix;
++    return a >= 0x7C00000000ULL && a < 0x8000000000ULL;
++}
+ 
+ /* ml173 THREAD-AWARE RECLAMATION of steered reserves (task #35/#36).
+  *
+@@ -16526,6 +16612,7 @@
+     if (!(vprot & VPROT_WRITE) || (vprot & (VPROT_EXEC | VPROT_WRITECOPY | VPROT_GUARD | VPROT_WRITEWATCH))) return 0;
+     if (!view || !is_view_valloc( view ) || (view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | VPROT_SYSTEM))) return 0;
+     if (b < 0x7000000000ULL || b >= 0x7c00000000ULL) return 0;   /* the guest band only */
++    if (ios_fex_arena_base_unix && b < ios_fex_arena_end_unix && b + size > ios_fex_arena_base_unix) return 0;   /* patch 0018: the emulator's band can sit inside the guest band */
+     if (size < ios_swap_floor()) return 0;   /* 8 MB unless madeira.cfg swap-min-mb (ml1257); lower once the footprint is high (0081) */
+     return 1;
+ }
+@@ -17583,7 +17670,9 @@
+ {
+     static int disabled = -1;
+ 
+-    if (disabled < 0) disabled = getenv( "MADEIRA_WIDE_USER_VA" ) ? 1 : 0;
++    /* Porthole patch 0018: V8's sandbox (Electron) works the address-space size out in bits from what it is told and crashes unless it is more than 40
++     * (this clamp advertises 39, 512GB). pa-pool32-soft = 1 therefore also keeps the wide claim, as MADEIRA_WIDE_USER_VA=1 does. */
++    if (disabled < 0) disabled = (getenv( "MADEIRA_WIDE_USER_VA" ) || ios_pa32_soft_enabled()) ? 1 : 0;
+     if (disabled) return;
+     if (!host_addr_space_limit || user_space_limit <= host_addr_space_limit) return;
+ 
+@@ -19197,6 +19286,8 @@
+     if (size && mmap_is_in_reserved_area( (void*)0x10000, size ) == 1)
+         anon_mmap_fixed( (void *)0x10000, size, PROT_READ | PROT_WRITE, 0 );
+ 
++    /* Porthole patch 0018: V8's 8GB sandbox holdback moves above the emulator's band, [0x7600000000,0x7800000000), so the furniture window keeps all of [alias end, band). */
++    if (ios_pa32_soft_enabled()) ios_cage_base_v = 0x7600000000ULL;
+     /* ml433 (#72): hold back the only 8GB-aligned stretch in the guest band
+      * before top-down placement can put furniture in it — see IOS_CAGE_BASE. */
+     if (anon_mmap_fixed( (void *)(uintptr_t)IOS_CAGE_BASE, IOS_CAGE_REAL_SIZE, PROT_NONE, 0 ) != MAP_FAILED)
+@@ -22105,7 +22196,7 @@
+                  * makes the negative readable: "no steer match" with ios_steer_n>0 means the table
+                  * lacks the entry, whereas no lines at all means this code path is not on the path
+                  * FEX's VirtualAlloc2 takes. */
+-                if ((uint64_t)(uintptr_t)base >= 0x7C00000000ULL)
++                if (ios_in_steer_band( (uint64_t)(uintptr_t)base ))
+                 {
+                     static int ac;
+                     uint64_t nb = (uint64_t)(uintptr_t)base, ne = nb + size;
+@@ -23393,7 +23484,7 @@
+                 {
+                     const char *pe = getenv( "MADEIRA_CAGE_RELEASE" );
+                     const char *off = getenv( "MADEIRA_STEER_PA_FIRST" );
+-                    steer_pa_first = pe && *pe == '1' && !(off && *off == '0');
++                    steer_pa_first = pe && *pe == '1' && !(off && *off == '0') && !ios_pa32_soft_enabled();   /* 0105: with the 32GB pool kept free, [0x7800000000,+32GB) is not for steered reserves */
+                     if (steer_pa_first) dprintf( 2, "[steer] 0077 steered reserves go to [0x7400000000,0x7c00000000) first; the emulator band keeps its space\n" );
+                 }
+                 if (steer_pa_first)
+@@ -23404,7 +23495,7 @@
+                 if (sst)
+                     sst = allocate_virtual_memory( ret, size_ptr, type, protect,
+                                                    ios_steer_slot,
+-                                                   (ULONG_PTR)host_addr_space_limit,
++                                                   ios_steer_top ? ios_steer_top : (ULONG_PTR)host_addr_space_limit,
+                                                    0, 0 );
+                 /* ml171: 16GB is not enough. Surviving longer spawns more threads, so
+                  * the reserve count went 27 -> 55 (28160MB) and BOTH the steer slot and
+@@ -23427,7 +23518,7 @@
+                     *ret = saved; *size_ptr = want;
+                     sst = allocate_virtual_memory( ret, size_ptr, type, protect,
+                                                    ios_steer_slot,
+-                                                   (ULONG_PTR)host_addr_space_limit, 0, 0 );
++                                                   ios_steer_top ? ios_steer_top : (ULONG_PTR)host_addr_space_limit, 0, 0 );
+                     if (sst)
+                     {
+                         *ret = saved; *size_ptr = want;
+@@ -23705,6 +23796,7 @@
+             }
+         }
+ 
++        if (st && is_jumbo) st = ios_pa32_cage_grant( process, ret, size_ptr, jumbo_size, type, protect );   /* patch 0018 */
+         if (is_jumbo) ios_jumbo_census( jumbo_hint, jumbo_size, st ? NULL : *ret, (unsigned)st );
+         if (!st && *size_ptr >= 0x10000000 && *size_ptr < 0x40000000 && (type & MEM_RESERVE))
+             ios_bigres_note( *ret, *size_ptr );
+@@ -23731,7 +23823,7 @@
+          * FEXMem_ThreadState allocation being hunted, which carries
+          * MEM_COMMIT|MEM_RESERVE|MEM_TOP_DOWN (0x103000). Reserving allocations are the only ones
+          * that can CHOOSE an address, so they are the only ones that can collide. */
+-        if (!st && *ret && (uint64_t)(uintptr_t)*ret >= 0x7C00000000ULL)
++        if (!st && *ret && ios_in_steer_band( (uint64_t)(uintptr_t)*ret ))
+         {
+             static int nc;
+             uint64_t nb = (uint64_t)(uintptr_t)*ret;
+@@ -24046,6 +24138,7 @@
+  * selector to behave exactly as before -- a failed reservation must never break
+  * a configuration that works today.
+  */
++static int ios_fex_band_reloc_wanted;
+ void ios_reserve_fex_arena(void)
+ {
+     static int done;
+@@ -24057,7 +24150,7 @@
+      * reservation has been observed to work, so smaller is worth trying before
+      * giving up -- the failure mode that matters is reserving NOTHING.
+      * The VM's ceiling is 63GiB, so nothing above that can ever succeed. */
+-    static const struct { ULONG_PTR lo, hi; SIZE_T size; const char *what; } plan[] = {
++    static struct { ULONG_PTR lo, hi; SIZE_T size; const char *what; } plan[] = {
+         { 0x7c00000000ull, 0x7fffffffffull, 0x400000000ull, "hardware high band 16GB"  },
+         { 0x0800000000ull, 0x0fffffffffull, 0x200000000ull, "constrained 8GB"          },
+         { 0x0400000000ull, 0x07ffffffffull, 0x200000000ull, "8GB @16-32G"              },
+@@ -24209,7 +24302,29 @@
+         {
+             arena_size_cap = (unsigned long long)mb * 1024ull * 1024ull;
+             dprintf( 2, "[fex-arena] ml995 size cap from arena-mb: %llu MB\n", arena_size_cap >> 20 );
++        }
++    }
++
++    /* Porthole patch 0018 (opt-in: madeira.cfg pa-pool32-soft = 1): put the 16GB band at 0x7400000000 instead of 0x7c00000000.
++     *
++     * Newer Chromium (Electron) wants one 32GB pool aligned to 32GB (PartitionAlloc splits it into two 16GB halves and uses both at once). The only
++     * 32GB-aligned stretch in the top window is [0x7800000000,0x8000000000), and the emulator's band is the top 16GB of it. With the band in
++     * [0x7400000000,0x7800000000), the ordinary slot walk below hands the guest 0x7800000000 as a real, aligned 32GB view. Steered reserves follow the
++     * band (ios_steer_slot/top) and stay out of the pool. The band is only moved if that 16GB is free right now; otherwise nothing changes. */
++    if (ios_pa32_soft_enabled())
++    {
++        mach_vm_address_t probe = 0x7400000000ull;
++        kern_return_t pk = mach_vm_map( mach_task_self(), &probe, 0x200000000ull, 0xffff, VM_FLAGS_FIXED,
++                                        MEMORY_OBJECT_NULL, 0, 0, PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY );
++        if (pk == KERN_SUCCESS)
++        {
++            mach_vm_deallocate( mach_task_self(), probe, 0x200000000ull );
++            plan[0].lo = 0x7400000000ull; plan[0].hi = 0x75ffffffffull; plan[0].size = 0x200000000ull;   /* 8GB: the emulator needs about 3.5GB */
++            plan[0].what = "Porthole 0018: 8GB band above the Oilpan slot";
++            ios_fex_band_reloc_wanted = 1;
+         }
++        else
++            dprintf( 2, "[pa32] patch0018 the 16GB at 0x7400000000 is not free (kr=%d) -- the band stays at 0x7c00000000 and no 32GB pool will be offered\n", (int)pk );
+     }
+ 
+     for (i = 0; i < ARRAY_SIZE(plan); i++)
+@@ -24250,6 +24365,13 @@
+                      plan[i].what, (int)kr );
+             continue;
+         }
++        /* Porthole patch 0018: the "CoreAnimation range" is only where 32GB of tag-51 chunks happened to land in free space at start-up (first-fit,
++         * so its top, 0x7818000000 in the field log, depends on how much free space lies below). It overlaps the band and the pool this patch needs, and
++         * enforcing it moved the band to 0x7818000000, which left no 32GB hole. With the opt-in the band is kept where the probe proved the 16GB free. */
++        if (ios_fex_band_reloc_wanted && addr == 0x7400000000ull && size == 0x200000000ull)
++            dprintf( 2, "[pa32] patch0018 keeping the band at 0x7400000000 although it overlaps the measured CoreAnimation span 0x%llx..0x%llx\n",
++                     ios_layerkit_lo, ios_layerkit_hi );
++        else
+         if (ios_layerkit_hi && addr + size > ios_layerkit_lo && addr < ios_layerkit_hi)
+         {
+             /* ml900/ml901: the kernel put the arena inside CoreAnimation's tag-51
+@@ -24360,6 +24482,23 @@
+             setenv( "WINE_IOS_FEX_ARENA_VERSION", "1", 1 );
+             ios_fex_arena_base_unix = (ULONG_PTR)base;
+             ios_fex_arena_end_unix  = (ULONG_PTR)base + size;
++            if (ios_fex_band_reloc_wanted && (ULONG_PTR)base == 0x7400000000ull)
++            {
++                ios_fex_band_relocated = 1;
++                ios_layerkit_enforce = 0;   /* the measured span covers the band and the pool; see the note at the arena placement */
++                ios_steer_slot = (ULONG_PTR)base;
++                ios_steer_top = (ULONG_PTR)base + size;
++                dprintf( 2, "[pa32] patch0018 the emulator's band is [%p,0x%llx); [0x7800000000,0x8000000000) is left for a real 32GB pool\n",
++                         base, (unsigned long long)((ULONG_PTR)base + size) );
++                {
++                    /* Oilpan's slot: hold the first 4GB of [0x7000000000,0x7800000000) now, before anything else can land there. */
++                    mach_vm_address_t hb = IOS_PA32_OILPAN_BASE;
++                    kern_return_t hk = mach_vm_map( mach_task_self(), &hb, IOS_PA32_OILPAN_REAL, 0xffff, VM_FLAGS_FIXED,
++                                                    MEMORY_OBJECT_NULL, 0, 0, PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY );
++                    if (hk == KERN_SUCCESS) ios_pa32_oilpan_hold = 1;
++                    dprintf( 2, "[pa32] patch0018 4GB held at 0x%llx for Oilpan's caged heap: kr=%d\n", (unsigned long long)IOS_PA32_OILPAN_BASE, (int)hk );
++                }
++            }
+             dprintf( 2, "[fex-arena] ml793 PUBLISHED [%p,0x%llx) size=0x%llx version=1 -- the "
+                         "emulator must CONSUME this range; it must not run its own selector\n",
+                      base, (unsigned long long)((ULONG_PTR)base + size),
+@@ -24923,6 +25062,7 @@
+         st = allocate_virtual_memory( ret, size_ptr, type, protect,
+                                       limit_low, limit_high, align, attributes );
+ 
++        if (st && is_jumbo) st = ios_pa32_cage_grant( process, ret, size_ptr, jumbo_size, type, protect );   /* patch 0018 */
+         if (is_jumbo) ios_jumbo_census( jumbo_hint, jumbo_size, st ? NULL : *ret, (unsigned)st );
+         if (!st && *size_ptr >= 0x10000000 && *size_ptr < 0x40000000 && (type & MEM_RESERVE))
+             ios_bigres_note( *ret, *size_ptr );
+@@ -24949,7 +25089,7 @@
+          * FEXMem_ThreadState allocation being hunted, which carries
+          * MEM_COMMIT|MEM_RESERVE|MEM_TOP_DOWN (0x103000). Reserving allocations are the only ones
+          * that can CHOOSE an address, so they are the only ones that can collide. */
+-        if (!st && *ret && (uint64_t)(uintptr_t)*ret >= 0x7C00000000ULL)
++        if (!st && *ret && ios_in_steer_band( (uint64_t)(uintptr_t)*ret ))
+         {
+             static int nc;
+             uint64_t nb = (uint64_t)(uintptr_t)*ret;
+--- a/build/ntdll-unix/signal_arm64_ios.c	2026-10-11 22:10:05
++++ b/build/ntdll-unix/signal_arm64_ios.c	2026-10-11 22:10:05
+@@ -1233,6 +1233,7 @@
+     ios_rr_pages[slot % IOS_RRPAGE_MAX] = pg;
+ }
+ 
++extern int ios_fex_band_contains( unsigned long long a );   /* virtual_ios.c: the emulator's band (patch 0018 can move it) */
+ void ios_reclaim_pages_report( const char *when, unsigned long long fault_addr );
+ void ios_reclaim_pages_report( const char *when, unsigned long long fault_addr )
+ {
+@@ -1243,7 +1244,7 @@
+     for (i = 0; i < shown; i++)
+     {
+         unsigned long long pg = ios_rr_pages[i];
+-        if (pg >= 0x7C00000000ULL && pg < 0x8000000000ULL) in_fex_band++;
++        if (ios_fex_band_contains( pg )) in_fex_band++;
+     }
+     dprintf( STDERR_FILENO,
+              "[reclaim-census] rev=ml329 at=%s fault=0x%llx : %u pages zero-filled this run, "
+@@ -1254,7 +1255,7 @@
+     for (i = 0; i < shown && i < 16; i++)
+         dprintf( STDERR_FILENO, "[reclaim-census]   pg[%u]=0x%llx%s\n", i,
+                  (unsigned long long)ios_rr_pages[i],
+-                 (ios_rr_pages[i] >= 0x7C00000000ULL && ios_rr_pages[i] < 0x8000000000ULL) ? "  <== FEX heap" : "" );
++                 ios_fex_band_contains( ios_rr_pages[i] ) ? "  <== FEX heap" : "" );
+ }
+ 
+ /* ml369 (#63): defined after setup_exception (needs save_context and
+@@ -4587,7 +4588,7 @@
+                     extern size_t ios_jit_pool_size_global;
+                     uint64_t rx = (uint64_t)(uintptr_t)ios_jit_rx_base_global;
+                     int in_pool_rx = rx && fa >= rx && fa < rx + ios_jit_pool_size_global;
+-                    int in_band    = (fa >= 0x7C00000000ULL && fa < 0x8000000000ULL);
++                    int in_band    = ios_fex_band_contains( fa );
+ 
+                     if (in_pool_rx || in_band)
+                     {
+@@ -4701,7 +4702,7 @@
+                         goto skip_reclaim_band;
+                 }
+                 if (!handled && fa != (uint64_t)fault_pc &&
+-                    fa >= 0x7C00000000ULL && fa < 0x8000000000ULL)
++                    ios_fex_band_contains( fa ))
+                 {
+                     static volatile uint64_t rr_pg[16] = {0};
+                     static volatile uint32_t rr_n[16]  = {0};

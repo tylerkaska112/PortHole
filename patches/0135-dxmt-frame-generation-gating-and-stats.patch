@@ -1,0 +1,157 @@
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -3351,6 +3351,16 @@
+   uint64_t last_abs;
+   double dt;
+   unsigned long long frames, generated, no_drawable;
++  /* 0135: what the display can show and what is still waiting for it. */
++  double hz;                                 /* the panel's top refresh rate (MADEIRA_FRAMEGEN_HZ, set by the app); 0 = unknown */
++  int inflight;                              /* generated and real frames presented by this path and not yet on the screen */
++  double disp_dt, last_pt;                   /* measured gap between two frames on the screen (seconds) */
++  unsigned long long skip_rate, skip_flight;
++  double acq_sum, acq_max;                   /* time spent getting the extra drawable */
++  unsigned acq_n;
++  uint64_t stat_abs;
++  unsigned long long stat_frames, stat_gen;
++  int inflight_max;
+ } g_fg;
+ 
+ static void madeira_fg_release(void) {
+@@ -3454,6 +3464,37 @@
+ static void madeira_fg_dispatch(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> p, NSUInteger w, NSUInteger h) {
+   [enc setComputePipelineState:p];
+   [enc dispatchThreads:MTLSizeMake(w, h, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
++}
++
++/* 0135: once every two seconds, what happened: the game's pace, how many frames were generated, why the others were not, how long the extra drawable took and what the screen did. */
++static void madeira_fg_stats(uint64_t now, uint32_t numer, uint32_t denom) {
++  if (!g_fg.stat_abs) { g_fg.stat_abs = now; return; }
++  double secs = (double)(now - g_fg.stat_abs) * numer / denom / 1e9;
++  if (secs < 2.0) return;
++  dprintf(STDERR_FILENO, "[framegen] %.1f s: game %.1f fps (frame %.1f ms), generated %.1f/s, skipped: screen too slow %llu, drawables busy %llu, none %llu | "
++          "extra drawable wait avg %.2f max %.1f ms | screen %.1f Hz seen, %.0f asked | in flight now %d, most %d\n",
++          secs, g_fg.stat_frames / secs, g_fg.dt * 1000.0, g_fg.stat_gen / secs, g_fg.skip_rate, g_fg.skip_flight, g_fg.no_drawable,
++          g_fg.acq_n ? g_fg.acq_sum / g_fg.acq_n : 0.0, g_fg.acq_max, g_fg.disp_dt > 0 ? 1.0 / g_fg.disp_dt : 0.0, g_fg.hz > 0 ? g_fg.hz : 0.0,
++          __atomic_load_n(&g_fg.inflight, __ATOMIC_RELAXED), g_fg.inflight_max);
++  g_fg.stat_abs = now; g_fg.stat_frames = 0; g_fg.stat_gen = 0; g_fg.skip_rate = g_fg.skip_flight = 0; g_fg.no_drawable = 0;
++  g_fg.acq_sum = g_fg.acq_max = 0; g_fg.acq_n = 0; g_fg.inflight_max = 0;
++}
++
++/* 0135: a frame this path presented is on its way to the screen; when it is on the screen it no longer holds a drawable of the layer's small pool. */
++static void madeira_fg_track(id<MTLDrawable> d) {
++  int n = __atomic_add_fetch(&g_fg.inflight, 1, __ATOMIC_RELAXED);
++  if (n > g_fg.inflight_max) g_fg.inflight_max = n;
++  [d addPresentedHandler:^(id<MTLDrawable> dd) {
++    __atomic_sub_fetch(&g_fg.inflight, 1, __ATOMIC_RELAXED);
++    double t = dd.presentedTime;
++    if (t > 0) {
++      if (g_fg.last_pt > 0) {
++        double x = t - g_fg.last_pt;
++        if (x > 0.002 && x < 0.1) g_fg.disp_dt = g_fg.disp_dt > 0 ? g_fg.disp_dt * 0.9 + x * 0.1 : x;
++      }
++      g_fg.last_pt = t;
++    }
++  }];
+ }
+ 
+ /* Returns 1 when it presented (the generated frame, then the real one). */
+@@ -3462,7 +3503,7 @@
+   id<MTLTexture> src = drawable.texture;
+   id<MTLDevice> dev = src.device;
+   uint64_t now = mach_absolute_time();
+-  int ni, have_prev;
++  int ni, have_prev, gen_ok = 1;
+ 
+   if (!tb.denom) mach_timebase_info(&tb);
+   if (g_fg.last_abs) {
+@@ -3473,9 +3514,22 @@
+   }
+   g_fg.last_abs = now;
+   if (!src || !madeira_fg_setup(dev, src)) return 0;
++  if (g_fg.hz == 0) { float h = madeira_fg_envf("MADEIRA_FRAMEGEN_HZ", 0.0f); g_fg.hz = h > 0 ? h : -1.0; }   /* -1: asked, not known */
+ 
+   ni = g_fg.cur ^ 1;
+   have_prev = g_fg.have_prev;
++  g_fg.stat_frames++;
++  /* 0135: show two frames per game frame only when the screen can, and only when the layer has the drawables for it. The 0.50.3xx version took a second drawable
++   * unconditionally and WAITED for it: a layer has two or three, the game's own, the generated one and the real one held back half a frame leave none, so the
++   * next frame stalled until one reached the screen, and the game ran at the screen's pace divided by two (a 60 fps game at 30 with the input lag of a full queue). */
++  if (have_prev) {
++    if (g_fg.hz > 0 && g_fg.dt < 1.9 / g_fg.hz) { g_fg.skip_rate++; gen_ok = 0; }          /* the game is too fast for the screen to show twice per frame */
++    else {
++      int maxd = (int)((CAMetalLayer *)drawable.layer).maximumDrawableCount;
++      if (maxd < 2) maxd = 2;
++      if (__atomic_load_n(&g_fg.inflight, __ATOMIC_RELAXED) + 2 > maxd) { g_fg.skip_flight++; gen_ok = 0; }
++    }
++  }
+   {
+     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+     [blit copyFromTexture:src toTexture:g_fg.hist[ni]];
+@@ -3486,7 +3540,7 @@
+     [enc setTexture:g_fg.hist[ni] atIndex:0];
+     [enc setTexture:g_fg.luma[ni] atIndex:1];
+     madeira_fg_dispatch(enc, g_fg.k_luma, g_fg.luma[ni].width, g_fg.luma[ni].height);
+-    if (have_prev) {
++    if (have_prev && gen_ok) {
+       int radius = (int)madeira_fg_envf("MADEIRA_FRAMEGEN_RADIUS", 6.0f);
+       float scale = 8.0f * madeira_fg_envf("MADEIRA_FRAMEGEN_MVSIGN", 1.0f);
+       if (radius < 1) radius = 1;
+@@ -3514,11 +3568,18 @@
+     g_fg.have_prev = 1;
+     return 0;
+   }
++  if (!gen_ok) {      /* this frame goes out as it is; the history still moves on */
++    g_fg.cur = ni;
++    g_fg.frames++;
++    madeira_fg_stats(now, tb.numer, tb.denom);
++    return 0;
++  }
+ 
+   id<CAMetalDrawable> extra = nil;
+   if (@available(iOS 26.0, macOS 26.0, *)) {
+     id<MTLFXFrameInterpolator> fi = (id<MTLFXFrameInterpolator>)g_fg.interp;
+     float mvs = madeira_fg_envf("MADEIRA_FRAMEGEN_MVSCALE", 1.0f);
++    uint64_t t0;
+     fi.colorTexture = g_fg.hist[ni];
+     fi.prevColorTexture = g_fg.hist[g_fg.cur];
+     fi.depthTexture = g_fg.depth;
+@@ -3534,12 +3595,19 @@
+     fi.jitterOffsetX = 0; fi.jitterOffsetY = 0;
+     fi.shouldResetHistory = g_fg.generated == 0;
+     [fi encodeToCommandBuffer:cb];
++    t0 = mach_absolute_time();
+     extra = [(CAMetalLayer *)drawable.layer nextDrawable];
++    {
++      double w = (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 1e6;   /* ms */
++      g_fg.acq_sum += w; g_fg.acq_n++;
++      if (w > g_fg.acq_max) g_fg.acq_max = w;
++    }
+   }
+   g_fg.cur = ni;
+   g_fg.frames++;
+   if (!extra || extra.texture.width != g_fg.w || extra.texture.height != g_fg.h) {
+     g_fg.no_drawable++;
++    madeira_fg_stats(now, tb.numer, tb.denom);
+     return 0;   /* the caller presents the real frame as usual */
+   }
+   {
+@@ -3547,12 +3615,16 @@
+     [blit copyFromTexture:g_fg.out toTexture:extra.texture];
+     [blit endEncoding];
+   }
++  madeira_fg_track(extra);
++  madeira_fg_track(drawable);
+   [cb presentDrawable:extra];
+   [cb presentDrawable:drawable atTime:CACurrentMediaTime() + g_fg.dt * 0.5];
+   g_fg.generated++;
+-  if (g_fg.generated == 1 || (g_fg.generated % 600) == 0)
+-    dprintf(STDERR_FILENO, "[framegen] %llu generated / %llu frames (no drawable %llu), game frame %.1f ms\n",
+-            g_fg.generated, g_fg.frames, g_fg.no_drawable, g_fg.dt * 1000.0);
++  g_fg.stat_gen++;
++  if (g_fg.generated == 1)
++    dprintf(STDERR_FILENO, "[framegen] first generated frame: game frame %.1f ms, screen %.0f Hz (MADEIRA_FRAMEGEN_HZ), drawables %d\n",
++            g_fg.dt * 1000.0, g_fg.hz > 0 ? g_fg.hz : 0.0, (int)((CAMetalLayer *)drawable.layer).maximumDrawableCount);
++  madeira_fg_stats(now, tb.numer, tb.denom);
+   return 1;
+ }
+ static int madeira_fg_present(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable) {

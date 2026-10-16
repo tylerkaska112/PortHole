@@ -1,0 +1,39 @@
+--- a/dlls/msvcrt/locale.c
++++ b/dlls/msvcrt/locale.c
+@@ -1953,6 +1953,18 @@
+ fail:
+     free_locinfo(locinfo);
+     return NULL;
++}
++
++/* Porthole 0131: name the locale that failed. Sekiro's startup throws std::runtime_error("bad locale name") (the STL does that when setlocale/_create_locale returns NULL), and
++ * nothing said which name or why. */
++static pthreadlocinfo create_locinfo_logged(int category, const char *locale, const threadlocinfo *old_locinfo)
++{
++    pthreadlocinfo r = create_locinfo(category, locale, old_locinfo);
++    static LONG n;
++    if (!r && InterlockedIncrement(&n) <= 24)
++        ERR("[locale] 0131 category %d name \"%s\" failed (ACP %u, OEMCP %u, user locale %04x)\n", category, locale ? locale : "(null)",
++            (unsigned)GetACP(), (unsigned)GetOEMCP(), (unsigned)GetUserDefaultLCID());
++    return r;
+ }
+ 
+ /*********************************************************************
+@@ -1966,7 +1978,7 @@
+     if(!loc)
+         return NULL;
+ 
+-    loc->locinfo = create_locinfo(category, locale, NULL);
++    loc->locinfo = create_locinfo_logged(category, locale, NULL);
+     if(!loc->locinfo) {
+         free(loc);
+         return NULL;
+@@ -2031,7 +2043,7 @@
+     /* Make sure that locinfo is not updated by e.g. stricmp function */
+     locale_flags = data->locale_flags;
+     data->locale_flags |= LOCALE_THREAD;
+-    newlocinfo = create_locinfo(category, locale, locinfo);
++    newlocinfo = create_locinfo_logged(category, locale, locinfo);
+     data->locale_flags = locale_flags;
+     if(!newlocinfo) {
+         WARN("%d %s failed\n", category, locale);

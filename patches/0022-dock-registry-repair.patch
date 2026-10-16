@@ -1,0 +1,104 @@
+diff --git a/app/Runtime/DockInstallers.swift b/app/Runtime/DockInstallers.swift
+index 2db3395..7c3b598 100644
+--- a/app/Runtime/DockInstallers.swift
++++ b/app/Runtime/DockInstallers.swift
+@@ -601,6 +601,7 @@ enum DockInstallers {
+         let batchFile = drive.appendingPathComponent(scriptName)
+         try? FileManager.default.removeItem(at: batchFile)
+         absorbResults(reason: "next-start", drive: drive, prefix: prefix)
++        DockRegistryRepair.run(drive: drive, prefix: prefix) { LogStore.shared.log($0) }
+         try? FileManager.default.removeItem(at: drive.appendingPathComponent(resultName))
+         guard enabled else {
+             LogStore.shared.log("[dock-installers] app=\(app) off (MADEIRA_DOCK_INSTALLERS=0)"); return
+diff --git a/app/Runtime/DockRegistryRepair.swift b/app/Runtime/DockRegistryRepair.swift
+new file mode 100644
+index 0000000..1e4c3fd
+--- /dev/null
++++ b/app/Runtime/DockRegistryRepair.swift
+@@ -0,0 +1,86 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Copyright 2026 125hz
++// Madeira Converter Exception: see LICENSE-EXCEPTION.md
++
++import Foundation
++
++/// Registry entries a program's installer writes, put back when the program's files are on
++/// disk but the entries are not. The wineserver keeps the registry in memory and writes it
++/// back on a timer and when it stops, so an installer's last registry writes are lost when
++/// the app is closed or killed soon after it finishes, while its files and shortcuts stay.
++/// The install then looks complete (the desktop icon is there) but anything that detects it
++/// through the registry says it is not installed. Far Cry 6: "Unable to detect Ubisoft
++/// Connect installation" with Ubisoft Connect fully extracted.
++///
++/// Only ever adds what is missing; a value that exists, whatever it holds, is left alone.
++/// Like the install records, it only runs while no session does (the registry is on disk).
++enum DockRegistryRepair {
++    struct Repair: Equatable {
++        var name: String
++        /// A file under drive_c whose presence means the program is installed.
++        var marker: String
++        /// Keys under HKLM (the 32-bit view first, as the installer is a 32-bit program).
++        var keys: [String]
++        var values: [(name: String, data: String)]
++        static func == (a: Repair, b: Repair) -> Bool { a.name == b.name }
++    }
++
++    static let known: [Repair] = [
++        Repair(name: "Ubisoft Connect",
++               marker: "Program Files (x86)/Ubisoft/Ubisoft Game Launcher/UbisoftGameLauncher.exe",
++               keys: ["Software\\Wow6432Node\\Ubisoft\\Launcher", "Software\\Ubisoft\\Launcher"],
++               values: [("InstallDir", "C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\")]),
++    ]
++
++    /// Wine's .reg text with the string values added where the key lacks them, and how many were added.
++    static func add(keys: [String], values: [(name: String, data: String)], in text: String, now: Int) -> (text: String, added: Int) {
++        var lines = text.components(separatedBy: "\n")
++        var added = 0
++        for key in keys {
++            let header = "[" + escape(key) + "]"
++            for value in values {
++                let prefix = "\"" + escape(value.name) + "\"="
++                let line = prefix + "\"" + escape(value.data) + "\""
++                if let start = lines.firstIndex(where: { $0.lowercased().hasPrefix(header.lowercased() + " ") || $0.lowercased() == header.lowercased() }) {
++                    var end = start + 1
++                    while end < lines.count, !lines[end].hasPrefix("[") { end += 1 }
++                    if (start + 1..<end).contains(where: { lines[$0].lowercased().hasPrefix(prefix.lowercased()) }) { continue }
++                    var at = end
++                    while at > start + 1, lines[at - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { at -= 1 }
++                    lines.insert(line, at: at)
++                } else {
++                    while let last = lines.last, last.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { lines.removeLast() }
++                    lines += ["", header + " \(now)", line, ""]
++                }
++                added += 1
++            }
++        }
++        return (lines.joined(separator: "\n"), added)
++    }
++
++    /// Runs every known repair whose marker file exists. Returns the programs that were repaired.
++    @discardableResult
++    static func run(drive: URL, prefix: URL, log: (String) -> Void = { _ in }) -> [String] {
++        let registry = prefix.appendingPathComponent("system.reg")
++        guard let data = try? Data(contentsOf: registry), !data.isEmpty else { return [] }   // a prefix not seeded yet
++        var text = String(decoding: data, as: UTF8.self)
++        var repaired: [String] = []
++        for repair in known where FileManager.default.fileExists(atPath: drive.appendingPathComponent(repair.marker).path) {
++            let (updated, added) = add(keys: repair.keys, values: repair.values, in: text, now: Int(Date().timeIntervalSince1970))
++            guard added > 0 else { continue }
++            text = updated
++            repaired.append(repair.name)
++            log("[dock-installers] registry repair: \(repair.name) is on disk but \(added) registry value(s) were missing; added")
++        }
++        guard !repaired.isEmpty else { return [] }
++        let backup = registry.appendingPathExtension("madeira-bak")
++        if !FileManager.default.fileExists(atPath: backup.path) { try? FileManager.default.copyItem(at: registry, to: backup) }
++        do { try Data(text.utf8).write(to: registry, options: .atomic) }
++        catch { log("[dock-installers] registry repair not written: \(error.localizedDescription)"); return [] }
++        return repaired
++    }
++
++    private static func escape(_ s: String) -> String {
++        s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
++    }
++}

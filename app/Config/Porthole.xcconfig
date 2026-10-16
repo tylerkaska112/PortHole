@@ -1,0 +1,24 @@
+// Settings that differ from one person's build to the next. The defaults here are neutral, so a build from this source
+// has nothing of its author's in it. To use your own, copy Local.xcconfig.example to Local.xcconfig (not committed) and edit it.
+
+// The app's bundle id. The extensions add ".jithelper" and ".tunnel". iOS identifies an app by this, so changing it makes a new app.
+PORTHOLE_BUNDLE_ID = site.portholehq.app
+
+// Where the app files its secrets and data on the device. Leave empty for the defaults.
+PORTHOLE_KEYCHAIN_SERVICE =
+PORTHOLE_STORAGE_FOLDER =
+
+// The Hub that updates and compatibility reports go to, until the person types another in Settings. Empty = none.
+// (In an xcconfig "//" starts a comment, so write a URL as  https:/$()/host:9445 .)
+PORTHOLE_HUB_URL =
+
+// Where this build's source code is online (shown in Settings > About > Licences). Set it to the public repository of the build you distribute.
+PORTHOLE_SOURCE_URL =
+
+// The name this build is registered under on the update server (the folder under /updates). Only matters with a Hub address.
+PORTHOLE_HUB_APP_ID = porthole
+
+// Which version of the game engine this is (Madeira commit + revision); compatibility reports are filed under it. Written by tools/engine.sh.
+#include "Engine.xcconfig"
+
+#include? "Local.xcconfig"

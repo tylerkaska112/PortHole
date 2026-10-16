@@ -1,0 +1,33 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-12 01:30:00
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-12 01:30:00
+@@ -23893,8 +23893,28 @@
+                     && !((unsigned long long)(uintptr_t)hint & 0xffffffffULL))
+                 {
+                     void *pb = NULL;
+-                    if (ios_pa32_soft_back2( *size_ptr, type, protect, &pb, 0x100000000ULL,
+-                                             *size_ptr == 0x100000000ULL ? 0x80000000ULL : *size_ptr ) == STATUS_SUCCESS)
++                    /* 0117: the holes have no 4GB boundary with a gigabyte after it (the furniture window's allocations and 0114's 16 GB real part sit on them; 0.50.230
++                     * log: 0116 found nothing and V8's three tries came back 64KB-aligned again). The middle of the 32 GB real view at 0x7800000000 is free: its holder
++                     * (PartitionAlloc's two halves) only ever used the first few MB of each half. Hand out 4GB-aligned slots there, inside the existing view. */
++                    {
++                        static const uint64_t xslots[] = { 0x7a00000000ULL, 0x7b00000000ULL, 0x7e00000000ULL, 0x7f00000000ULL };
++                        static unsigned xtaken;
++                        unsigned xi;
++                        for (xi = 0; xi < 4 && !pb; xi++)
++                        {
++                            if (xtaken & (1u << xi)) continue;
++                            if (!find_view( (const void *)(uintptr_t)xslots[xi], 0x1000 )) continue;
++                            xtaken |= 1u << xi;
++                            pb = (void *)(uintptr_t)xslots[xi];
++                        }
++                        if (pb)
++                        {
++                            pick = pb; sz = *size_ptr; st2 = 0;
++                            dprintf( 2, "[pa32] patch0117 %lu MB ask (hint %p) served 4GB-aligned inside the idle view at %p\n", (unsigned long)(*size_ptr >> 20), hint, pb );
++                        }
++                    }
++                    if (st2 && ios_pa32_soft_back2( *size_ptr, type, protect, &pb, 0x100000000ULL,
++                                                    *size_ptr == 0x100000000ULL ? 0x80000000ULL : *size_ptr ) == STATUS_SUCCESS)
+                     {
+                         pick = pb; sz = *size_ptr; st2 = 0;
+                         dprintf( 2, "[pa32] patch0116 %lu MB ask (hint %p) served 4GB-aligned at %p\n", (unsigned long)(*size_ptr >> 20), hint, pb );

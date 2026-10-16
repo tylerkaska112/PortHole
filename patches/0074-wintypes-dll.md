@@ -1,0 +1,6 @@
+# 0074 wintypes.dll added to the ARM64EC system libraries
+
+Rust (Unity IL2CPP, 2026-10-06): `RustClient.exe` showed "Fatal error: Failed to load il2cpp". The loader trace (`WINEDEBUG=err+all,trace+loaddll,warn+module`) showed why: `GameAssembly.dll` imports `api-ms-win-core-winrt-robuffer-l1-1-0.dll`; Wine's `apisetschema` maps that name to `wintypes.dll`; `wintypes.dll` was not in `arm64ec-windows` (nor `aarch64-windows`), so `load_dll [dll-missing] "wintypes.dll" status=c0000135` and then `import_dll Library api-ms-win-core-winrt-robuffer-l1-1-0.dll ... not found`, and GameAssembly.dll failed with c0000135, which Unity reports as the il2cpp dialog.
+
+Fix: `wintypes.dll` built from the pinned Wine submodule (`DEST=... bash vendor/Madeira/build/wine-pe/build-modules.sh wintypes`, ARM64EC, 786 KB, exports `RoGetBufferMarshaler` and the other Ro* functions; imports only combase, ucrtbase, kernel32, ntdll which are shipped) into `vendor/Madeira/app/Madeira/arm64ec-windows/`. Every file there is linked into `sysx64`, which is where x64 programs find it. It is listed in `docs/REBUILT_BINARIES.sha256`. Nothing else changed.
+Not verified on a device. If Rust gets further, the next missing piece will show in the same trace.

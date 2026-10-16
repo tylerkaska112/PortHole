@@ -1,0 +1,60 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-12 01:50:00
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-12 01:50:00
+@@ -1764,7 +1764,45 @@
+              (unsigned)rst, 0x7e00000000ULL, (unsigned long long)want, (unsigned)st );
+     return st;
+ }
++
++/* 0118: an ask the holes cannot serve (no 4GB boundary with a free gigabyte after it) is given a SOFT range at an aligned base whose first 512 MB are unmapped:
++ * nothing is reserved, the guest's commits materialise on demand (ios_soft). V8's second 16 GB ask (hints 16GB-aligned, ten tries, then Chrome's fatal) needs only
++ * this. Bases are searched downwards from below the pool window. */
++static NTSTATUS ios_pa32_soft_far_base( SIZE_T req, uint64_t hint, void **ret )
++{
++    uint64_t align = hint ? (hint & -hint) : 0x100000000ULL, base;
++    unsigned i;
+ 
++    if (align > 0x400000000ULL) align = 0x400000000ULL;
++    if (align < 0x100000000ULL) align = 0x100000000ULL;
++    if (ios_soft_n >= IOS_SOFT_MAX) return STATUS_NO_MEMORY;
++    for (base = (0x7000000000ULL - req) & ~(align - 1); base >= 0x2000000000ULL; base -= align)
++    {
++        mach_vm_address_t r = base;
++        mach_vm_size_t sz = 0;
++        vm_region_basic_info_data_64_t info;
++        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
++        mach_port_t obj = MACH_PORT_NULL;
++        kern_return_t kr = mach_vm_region( mach_task_self(), &r, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj );
++        int taken = 0;
++
++        if (kr == KERN_SUCCESS && r < base + 0x20000000ULL) continue;     /* something is mapped in the first 512 MB */
++        for (i = 0; i < ios_soft_n; i++)
++            if (base < ios_soft[i].base + ios_soft[i].size && base + req > ios_soft[i].base) { taken = 1; break; }
++        if (taken) continue;
++        ios_soft[ios_soft_n].base = base;
++        ios_soft[ios_soft_n].size = req;
++        ios_soft[ios_soft_n].committed = 0;
++        ios_soft[ios_soft_n].commits = 0;
++        ios_soft[ios_soft_n].collisions = 0;
++        ios_soft[ios_soft_n].cage = 0;
++        ios_soft_n++;
++        *ret = (void *)(uintptr_t)base;
++        return STATUS_SUCCESS;
++    }
++    return STATUS_NO_MEMORY;
++}
++
+ static void ios_bigres_commit( void *addr, size_t size )
+ {
+     uint64_t a = (uint64_t)(uintptr_t)addr;
+@@ -25339,6 +25377,11 @@
+                 *ret = pb; *size_ptr = jumbo_size; st = STATUS_SUCCESS;
+                 dprintf( 2, "[pa32] patch0114 %lu MB reserve served from a hole at %p (1 GB real, rest soft)\n", (unsigned long)(jumbo_size >> 20), pb );
+             }
++            else if (ios_pa32_soft_far_base( jumbo_size, (uint64_t)(uintptr_t)jumbo_hint, &pb ) == STATUS_SUCCESS)   /* 0118 */
++            {
++                *ret = pb; *size_ptr = jumbo_size; st = STATUS_SUCCESS;
++                dprintf( 2, "[pa32] patch0118 %lu MB reserve (hint %p) served as a soft range at %p; nothing reserved\n", (unsigned long)(jumbo_size >> 20), jumbo_hint, pb );
++            }
+         }
+         if (st && is_jumbo) st = ios_pa32_cage_grant( process, ret, size_ptr, jumbo_size, type, protect );   /* patch 0018 */
+         if (is_jumbo) ios_jumbo_census( jumbo_hint, jumbo_size, st ? NULL : *ret, (unsigned)st );

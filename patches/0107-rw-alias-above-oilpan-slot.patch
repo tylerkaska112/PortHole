@@ -1,0 +1,48 @@
+--- a/app/Runtime/StikJITHelper.swift
++++ b/app/Runtime/StikJITHelper.swift
+@@ -158,13 +158,19 @@
+     private static let scLayout2HoldSize: vm_size_t = 0x100000000
+     private static var scHoldTaken = false
+ 
++    /// Porthole 0106/0107 (patch 0105's layout; the game's own pa-pool32-soft = 1 line or MADEIRA_PA_POOL32_SOFT=1): the first 4GB of the slot at 0x7000000000 belong to
++    /// Oilpan's caged heap, so the usual RW alias starts above it.
++    private static func usualAlias() -> vm_address_t {
++        (MadeiraConfig.gameValue("pa-pool32-soft") == "1" || MadeiraConfig.flag("MADEIRA_PA_POOL32_SOFT", fallback: false)) ? 0x7100000000 : 0x7000000000
++    }
++
+     /// The RW alias hint: 0x7900000000 with the hold taken for layout 2, else the
+-    /// usual 0x7000000000.
++    /// usual 0x7000000000 (0x7100000000 with pa-pool32-soft).
+     private static func rwAliasHint() -> vm_address_t {
+         if scHoldTaken { return scLayout2Alias }
+         let v = (MadeiraConfig.gameValue("env.MADEIRA_SC_PA_POOLS") ?? MadeiraConfig.get("env.MADEIRA_SC_PA_POOLS") ?? "")
+             .trimmingCharacters(in: .whitespacesAndNewlines)
+-        guard v.hasPrefix("2") else { return 0x7000000000 }
++        guard v.hasPrefix("2") else { return usualAlias() }
+         var a = scLayout2Hold
+         let kr = vm_allocate(mach_task_self_, &a, scLayout2HoldSize, 0 /* VM_FLAGS_FIXED */)
+         guard kr == KERN_SUCCESS, a == scLayout2Hold else {
+@@ -183,7 +189,7 @@
+             LogStore.shared.log(String(format: "[sc-cef] layout 2: [0x%lx,+4GB) is not free (kr=%d; first region 0x%lx+0x%lx prot=%d/%d, region kr=%d) -- usual RW alias placement",
+                                        Int(scLayout2Hold), kr, Int(ra), Int(rs), Int(info.protection), Int(info.max_protection), rkr),
+                                 level: .error)
+-            return 0x7000000000
++            return usualAlias()
+         }
+         _ = vm_protect(mach_task_self_, a, scLayout2HoldSize, 0, VM_PROT_NONE)
+         scHoldTaken = true
+@@ -1087,12 +1093,12 @@
+         )
+         if rwFixed && kr1 != KERN_SUCCESS {
+             rwAliasDrop(kr1)
+-            rwAddr = 0x7000000000
++            rwAddr = usualAlias()
+             kr1 = vm_remap(mach_task_self_, &rwAddr, vm_size_t(poolSize), 0, VM_FLAGS_ANYWHERE,
+                            mach_task_self_, vm_address_t(bitPattern: rxPtr), 0, &curProt, &maxProt, VM_INHERIT_NONE)
+         } else if kr1 == KERN_SUCCESS && !rwAliasKeep(rwAddr) {
+             vm_deallocate(mach_task_self_, rwAddr, vm_size_t(poolSize))
+-            rwAddr = 0x7000000000
++            rwAddr = usualAlias()
+             kr1 = vm_remap(mach_task_self_, &rwAddr, vm_size_t(poolSize), 0, VM_FLAGS_ANYWHERE,
+                            mach_task_self_, vm_address_t(bitPattern: rxPtr), 0, &curProt, &maxProt, VM_INHERIT_NONE)
+         }

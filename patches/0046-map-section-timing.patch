@@ -1,0 +1,27 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -18105,7 +18105,24 @@
+      * MAP_SHARED so the client view is coherent with wineserver writes. The
+      * for_image=FALSE override tells map_file_into_view_ex to take the shared
+      * path (default for_image=TRUE preserves PE-image MAP_PRIVATE behavior). */
++    /* Porthole 0046 (diagnostic): which file a plain (non-image) section maps and how long it takes. Black Ops 3's protection maps a
++     * file after its module lookup now succeeds (0045) and the thread then sits in memmove for tens of seconds. */
++    struct timespec ios_t0, ios_t1;
++    int ios_big = size >= 0x400000;
++    if (ios_big)
++    {
++        char path[1024] = "?";
++        fcntl( unix_handle, F_GETPATH, path );
++        clock_gettime( CLOCK_MONOTONIC, &ios_t0 );
++        dprintf( 2, "[map-sec] 0046 begin size=%#lx offset=%#llx vprot=%#x file=%s\n", (unsigned long)size, (unsigned long long)offset.QuadPart, vprot, path );
++    }
+     res = map_file_into_view_ex( view, unix_handle, 0, size, offset.QuadPart, vprot, needs_close, FALSE );
++    if (ios_big)
++    {
++        clock_gettime( CLOCK_MONOTONIC, &ios_t1 );
++        dprintf( 2, "[map-sec] 0046 done res=%#x in %lld ms\n", res,
++                 (long long)(ios_t1.tv_sec - ios_t0.tv_sec) * 1000 + (ios_t1.tv_nsec - ios_t0.tv_nsec) / 1000000 );
++    }
+     if (res == STATUS_SUCCESS)
+     {
+         /* file mappings must always be accessible */

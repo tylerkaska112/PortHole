@@ -1,0 +1,24 @@
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -1503,7 +1503,7 @@
+  * "[x86_code] <tag> <address>: <hex>", so the log can be disassembled on the Mac. */
+ static void ios_dump_x86_code( const char *tag, uint64_t addr, size_t before, size_t after )
+ {
+-    uint8_t buf[512];
++    static uint8_t buf[0x5000];   /* only the exception thread calls this */
+     mach_vm_size_t got = 0;
+     uint64_t start;
+     size_t len = before + after, i;
+@@ -5940,6 +5940,12 @@
+                                 /* Porthole 0039: the code that made the call (return address of the newest callret entry), and the code
+                                  * at State.RIP. */
+                                 ios_dump_x86_code( "call-site", cr[0], 0x1c0, 0x20 );
++                                /* Porthole 0041: the wider code around the call site (the function is spread over many small pieces joined by jumps),
++                                 * 8 KB either side, once. */
++                                {
++                                    static int wide_done;
++                                    if (!wide_done) { wide_done = 1; ios_dump_x86_code( "wide", cr[0] & ~0xfffULL, 0x2000, 0x2000 + 0x1000 ); }
++                                }
+                                 if (state_rip != cr[0]) ios_dump_x86_code( "rip", state_rip, 0x40, 0x80 );
+                             }
+                         }

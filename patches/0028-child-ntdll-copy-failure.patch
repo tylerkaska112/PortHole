@@ -1,0 +1,18 @@
+diff --git a/build/ntdll-unix/loader_ios.c b/build/ntdll-unix/loader_ios.c
+index b59b458..5f27415 100644
+--- a/build/ntdll-unix/loader_ios.c
++++ b/build/ntdll-unix/loader_ios.c
+@@ -3844,6 +3844,13 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
+             if (ios_jit_copy_module_for_child(pLdrInitializeThunk, child_peb) != 0)
+             {
+                 dprintf(STDERR_FILENO, "[Wine child] ntdll copy FAILED — falling back to SHARED ntdll (module lists will collide!)\n");
++                /* Porthole 0028: a 32-bit child cannot run on the shared ntdll at all (its wow64 hook pointer is never set, so the
++                 * first thing it does is call NULL, and the exception dispatcher then enters a critical section that does not
++                 * exist: an endless fault storm that the storm guard ends with task_terminate, i.e. the WHOLE APP). Fail this child
++                 * only, like the other boot failures. Seen when Ubisoft Connect's helper processes (UplayWebCore --type=gpu-process)
++                 * started with the JIT pool full. */
++                if (!is_machine_64bit( ios_cur_image_info()->Machine ))
++                    CHILD_BOOT_FAIL( "ntdll copy failed (JIT pool full): a 32-bit child cannot start on the shared ntdll\n" );
+             }
+             else
+             {

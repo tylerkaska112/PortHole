@@ -1,0 +1,66 @@
+--- a/vendor/Madeira/build/ntdll-unix/virtual_ios.c
++++ b/vendor/Madeira/build/ntdll-unix/virtual_ios.c
+@@ -15873,6 +15873,36 @@
+                  (unsigned long long)(lived_ns / 1000000), ios_swap_nchurny );
+     }
+ }
++/* Porthole 0081 (opt-in): the swap cut-off that drops when the app's memory gets tight.
++ *
++ * Sons of the Forest (2026-10-07): with the cut-off at 8 MB the loading runs twice as fast as with Wide, because Unity's hot 4 MB heap blocks stay in RAM,
++ * but they cost ~2.3 GB and the app reaches iOS's 6.1 GB limit near the end of the load (4 MB: the blocks go to the file, 2.9 GB, but the load is as slow
++ * as Wide; 6 MB behaves like 8 MB). So: MADEIRA_SWAP_AUTO_AT_MB = N keeps the cut-off at its normal value (swap-min-mb, 8 MB by default) until the footprint
++ * (ios_last_footprint_mb, published every 250 ms by the pool warmer) reaches N, then lowers it to MADEIRA_SWAP_AUTO_MIN_KB (default 1024 = 1 MB) for every
++ * commit from then on. What was allocated before stays where it is. One way: the floor never goes back up. Without the variable nothing changes. */
++static size_t ios_swap_floor( void )
++{
++    static int armed = -1, tripped;
++    static unsigned long long at_mb;
++    static size_t low;
++    if (armed < 0)
++    {
++        const char *e = getenv( "MADEIRA_SWAP_AUTO_AT_MB" ), *k = getenv( "MADEIRA_SWAP_AUTO_MIN_KB" );
++        unsigned long long kb = (k && strtoull( k, NULL, 10 ) >= 64) ? strtoull( k, NULL, 10 ) : 1024;
++        at_mb = e ? strtoull( e, NULL, 10 ) : 0;
++        armed = at_mb >= 512;
++        low = (size_t)kb << 10;
++        if (armed) dprintf( 2, "[swap] 0081 auto cut-off: %zu KB until the app footprint reaches %llu MB, then %zu KB (MADEIRA_SWAP_AUTO_AT_MB / MADEIRA_SWAP_AUTO_MIN_KB)\n",
++                            ios_swap_min >> 10, at_mb, low >> 10 );
++    }
++    if (!armed) return ios_swap_min;
++    if (!tripped && ios_last_footprint_mb >= at_mb)
++    {
++        tripped = 1;
++        dprintf( 2, "[swap] 0081 auto cut-off: app footprint %llu MB >= %llu MB, commits of %zu KB and more go to the file from now on\n", ios_last_footprint_mb, at_mb, low >> 10 );
++    }
++    return tripped && low < ios_swap_min ? low : ios_swap_min;
++}
+ static int ios_swap_eligible( const void *base, size_t size, unsigned int vprot, struct file_view *view )
+ {
+     uintptr_t b = (uintptr_t)base;
+@@ -15880,7 +15910,7 @@
+     if (!(vprot & VPROT_WRITE) || (vprot & (VPROT_EXEC | VPROT_WRITECOPY | VPROT_GUARD | VPROT_WRITEWATCH))) return 0;
+     if (!view || !is_view_valloc( view ) || (view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | VPROT_SYSTEM))) return 0;
+     if (b < 0x7000000000ULL || b >= 0x7c00000000ULL) return 0;   /* the guest band only */
+-    if (size < ios_swap_min) return 0;   /* 8 MB unless madeira.cfg swap-min-mb (ml1257) */
++    if (size < ios_swap_floor()) return 0;   /* 8 MB unless madeira.cfg swap-min-mb (ml1257); lower once the footprint is high (0081) */
+     return 1;
+ }
+ /* blocks/wide/broad: why a range is (not) eligible; the census counts by this. */
+@@ -15938,7 +15968,7 @@
+     if (ios_swap_is_fexjit( b, size )) return IOS_SW_FEXJIT;
+     if (ios_swap_broad) { if (b + size > 0x7c00000000ULL) return IOS_SW_BAND; }   /* ml1257: FEX's band and above */
+     else if (!ios_swap_wide && (b < 0x7000000000ULL || b >= 0x7c00000000ULL)) return IOS_SW_BAND;
+-    if (size < ios_swap_min) return IOS_SW_SMALL;
++    if (size < ios_swap_floor()) return IOS_SW_SMALL;
+     if (ios_swap_churny( size )) { ios_swap_churn_skips++; return IOS_SW_CHURN; }   /* ml1258 */
+     return IOS_SW_BACKED;
+ }
+@@ -16261,7 +16291,7 @@
+     if (!is_view_valloc( view ) || (view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | VPROT_SYSTEM | VPROT_WRITEWATCH |
+                                                      VPROT_PLACEHOLDER | VPROT_FREE_PLACEHOLDER | VPROT_ARM64EC)))
+     { ios_swap_skip_bytes[IOS_SWK_VIEW] += view->size; return 0; }
+-    if (view->size < ios_swap_min) { ios_swap_skip_bytes[IOS_SWK_SMALL] += view->size; return 0; }
++    if (view->size < ios_swap_floor()) { ios_swap_skip_bytes[IOS_SWK_SMALL] += view->size; return 0; }
+     if (view->size > ios_swap_resv_max) { ios_swap_skip_bytes[IOS_SWK_BIG] += view->size; return 0; }
+     if (ios_swap_is_fexjit( b, view->size ) || b + view->size > 0x7c00000000ULL)
+     { ios_swap_skip_bytes[IOS_SWK_FEXJIT] += view->size; return 0; }

@@ -1,0 +1,63 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -217,6 +217,8 @@
+ static int ios_pool_ledger_count;
+ 
+ #define IOS_POOL_FREE_MAX 256
++#define IOS_POOL_RUN_QUARANTINE_SEC 60   /* 0094 */
++#define IOS_POOL_RUN_MIN 0x20000   /* 0093: the smallest run of executable pages worth keeping from a half-poisoned range */
+ #define IOS_POOL_REUSE_GRACE_SEC 3
+ /* Darwin madvise: MADV_FREE marks pages volatile; MADV_FREE_REUSE is the
+  * documented cancel. Guard for older SDK headers. */
+@@ -2426,10 +2428,47 @@
+             if (!ios_pool_range_execable( ios_pool_freelist[i].off,
+                                           ios_pool_freelist[i].size, &cur, &mx ))
+             {
+-                dprintf(2, "[jit-pool] POISONED range off=0x%lx size=0x%lx cur=0x%x max=0x%x — dropped, NOT handed out\n",
+-                        (unsigned long)ios_pool_freelist[i].off,
+-                        (unsigned long)ios_pool_freelist[i].size, cur, mx);
+-                ios_pool_freelist[i] = ios_pool_freelist[--ios_pool_free_count];
++                /* Porthole 0093: a freed range lost its exec blessing only in SOME pages (the .data of the module that lived there is made writable, and
++                 * a page that is read-write once can never be executable again); the rest is as good as new. The old code dropped the whole range:
++                 * in one RDR2 log 237 ranges, 464 MB of a 1056 MB pool, were lost that way and the launcher's second process could not load its libraries.
++                 * Keep every run of still-executable pages of at least IOS_POOL_RUN_MIN as a range of its own. */
++                {
++                    size_t f_off = ios_pool_freelist[i].off, f_size = ios_pool_freelist[i].size, p, run_start = 0, kept = 0;
++                    int in_run = 0, n_runs = 0;
++                    /* The threads of a process that exited can run on for a while (a killed thread only dies at its next server request: one came back 1-2 s after
++                     * its process was reclaimed and called into the ntdll copy a split run had been handed to: ILL). Runs wait IOS_POOL_RUN_QUARANTINE_SEC longer than the usual grace. */
++                    time_t f_at = ios_pool_freelist[i].freed_at + IOS_POOL_RUN_QUARANTINE_SEC;
++                    int slot = i;
++                    unsigned int c2, m2;
++                    dprintf(2, "[jit-pool] POISONED range off=0x%lx size=0x%lx cur=0x%x max=0x%x — splitting off its executable runs (0093)\n",
++                            (unsigned long)f_off, (unsigned long)f_size, cur, mx);
++                    for (p = 0; p <= f_size; p += 0x4000)
++                    {
++                        int ok = p < f_size && ios_pool_range_execable( f_off + p, 0x4000, &c2, &m2 );
++                        if (ok && !in_run) { in_run = 1; run_start = p; }
++                        if (!ok && in_run)
++                        {
++                            size_t len = p - run_start;
++                            in_run = 0;
++                            if (len >= IOS_POOL_RUN_MIN)
++                            {
++                                if (slot >= 0) { ios_pool_freelist[slot].off = f_off + run_start; ios_pool_freelist[slot].size = len; ios_pool_freelist[slot].freed_at = f_at; slot = -1; }
++                                else if (ios_pool_free_count < IOS_POOL_FREE_MAX)
++                                {
++                                    ios_pool_freelist[ios_pool_free_count].off = f_off + run_start;
++                                    ios_pool_freelist[ios_pool_free_count].size = len;
++                                    ios_pool_freelist[ios_pool_free_count].freed_at = f_at;
++                                    ios_pool_freelist[ios_pool_free_count].advised = 1;
++                                    ios_pool_free_count++;
++                                }
++                                else continue;
++                                kept += len; n_runs++;
++                            }
++                        }
++                    }
++                    if (slot >= 0) ios_pool_freelist[slot] = ios_pool_freelist[--ios_pool_free_count];   /* nothing usable was left */
++                    dprintf(2, "[jit-pool] 0093 kept %d executable run(s), 0x%lx of 0x%lx bytes\n", n_runs, (unsigned long)kept, (unsigned long)f_size);
++                }
+                 i--;
+                 continue;
+             }

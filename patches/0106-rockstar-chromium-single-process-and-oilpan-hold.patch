@@ -1,0 +1,98 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-11 22:19:39
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-11 22:19:39
+@@ -23737,7 +23737,8 @@
+                     *size_ptr = sz;
+                     st = STATUS_SUCCESS;
+                 }
+-                else if (ios_soft_n < IOS_SOFT_MAX && *size_ptr >= 0x400000000ULL)
++                else if (ios_soft_n < IOS_SOFT_MAX && *size_ptr >= 0x400000000ULL
++                         && !(ios_pa32_soft_enabled() && ios_pa32_oilpan_hold && *size_ptr == 0x800000000ULL))   /* 0106: that ask is Oilpan's; it is served from its hold below, not as a soft slot that overlaps the pool */
+                 {
+                     /* ml151: every real placement failed. Hand PA a 16GB-aligned
+                      * slot nobody has taken and record it SOFT — see ios_soft.
+--- a/build/ntdll-unix/process_ios.c	2026-10-11 22:19:39
++++ b/build/ntdll-unix/process_ios.c	2026-10-11 22:19:39
+@@ -1788,6 +1788,83 @@
+             }
+         }
+     }
++
++    /* Porthole 0106: Rockstar's launcher shows its pages with Chromium (CEF). SocialClubHelper.exe is the CEF host program: started without --type= it is the
++     * browser, and it starts itself again with --type=gpu-process / renderer / utility. Every Chromium process asks for its own 32 GB-aligned PartitionAlloc
++     * pool and Oilpan heap, and all the processes here share ONE address space (see the steamwebhelper note above), so a second one cannot get a pool.
++     * Same remedy as steamwebhelper's: run the browser in Chromium's single-process mode and refuse the --type= children. Only with
++     * MADEIRA_ROCKSTAR_SINGLE_PROCESS=1 (set by the app for Red Dead Redemption 2); the command lines are logged either way. */
++    {
++        static const char host_name[] = "\\socialclubhelper.exe";
++        static const char typesw[] = "--type=", singlesw[] = "--single-process";
++        const char *sp_env = getenv( "MADEIRA_ROCKSTAR_SINGLE_PROCESS" );
++        const WCHAR *ip = params->ImagePathName.Buffer;
++        int ip_len = params->ImagePathName.Length / sizeof(WCHAR);
++        const WCHAR *cl = params->CommandLine.Buffer;
++        int cl_len = params->CommandLine.Length / sizeof(WCHAR);
++        int hl = sizeof(host_name) - 1, is_host = 0, has_type = 0, has_single = 0, k, j;
++
++        for (k = 0; k + hl <= ip_len && !is_host; k++)
++        {
++            if (k + hl != ip_len) continue;                       /* the name has to END the path */
++            for (j = 0; j < hl; j++)
++            {
++                WCHAR c = ip[k + j];
++                if (c >= 'A' && c <= 'Z') c += 32;
++                if (c != (WCHAR)host_name[j]) break;
++            }
++            if (j == hl) is_host = 1;
++        }
++        if (is_host)
++        {
++            for (k = 0; k + 7 <= cl_len && !has_type; k++)
++            {
++                for (j = 0; j < 7; j++) if (cl[k + j] != (WCHAR)typesw[j]) break;
++                if (j == 7) has_type = 1;
++            }
++            for (k = 0; k + 16 <= cl_len && !has_single; k++)
++            {
++                for (j = 0; j < 16; j++) if (cl[k + j] != (WCHAR)singlesw[j]) break;
++                if (j == 16) has_single = 1;
++            }
++            {
++                char line[168];
++                int pos, li;
++                for (pos = 0; pos < cl_len && pos < 1600; pos += 160)
++                {
++                    for (li = 0; li < 160 && pos + li < cl_len; li++)
++                        line[li] = (cl[pos + li] >= 32 && cl[pos + li] < 127) ? (char)cl[pos + li] : '?';
++                    line[li] = 0;
++                    dprintf( 2, "[proc-gate] cmdline(socialclubhelper)+%d: %s\n", pos, line );
++                }
++            }
++            if (sp_env && sp_env[0] == '1')
++            {
++                if (has_type)
++                {
++                    dprintf( 2, "[proc-gate] REFUSING SocialClubHelper --type= child (Rockstar's Chromium runs single-process; 0106)\n" );
++                    return STATUS_ACCESS_DENIED;
++                }
++                if (!has_single)
++                {
++                    static const char add[] = " --single-process --disable-gpu --disable-gpu-compositing --enable-logging=file";
++                    int al = sizeof(add) - 1, o = 0;
++                    WCHAR *nbuf = malloc( (cl_len + al + 1) * sizeof(WCHAR) );
++                    if (nbuf)
++                    {
++                        memcpy( nbuf, cl, cl_len * sizeof(WCHAR) );
++                        o = cl_len;
++                        for (j = 0; j < al; j++) nbuf[o++] = (WCHAR)add[j];
++                        nbuf[o] = 0;
++                        params->CommandLine.Buffer = nbuf;
++                        params->CommandLine.Length = o * sizeof(WCHAR);
++                        params->CommandLine.MaximumLength = params->CommandLine.Length + sizeof(WCHAR);
++                        dprintf( 2, "[proc-gate] SocialClubHelper.exe: injected --single-process --disable-gpu (0106)\n" );
++                    }
++                }
++            }
++        }
++    }
+ #endif
+ 
+     unixdir = get_unix_curdir( params );

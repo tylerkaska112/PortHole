@@ -1,0 +1,20 @@
+diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+index 13040915..aa270e0e 100644
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -586,9 +586,12 @@ DWORD WINAPI DECLSPEC_HOTPATCH SetThreadIdealProcessor( HANDLE thread, DWORD pro
+ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadIdealProcessorEx( HANDLE thread, PROCESSOR_NUMBER *ideal,
+                                                          PROCESSOR_NUMBER *previous )
+ {
+-    FIXME( "(%p %p %p): stub\n", thread, ideal, previous );
+-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+-    return FALSE;
++    /* Porthole 0038: report success. Nothing can be scheduled on a chosen processor on iOS, and Intel Embree (Counter-Strike 2's
++     * ray-tracing library, behind Steam Audio) treats FALSE as a failure and writes a warning to std::cerr, whose object the C++
++     * runtime has not constructed for it: a null stream, and the game died there every time (embree3.dll+0x1bec). */
++    TRACE( "(%p %p %p): ignored\n", thread, ideal, previous );
++    if (previous) { previous->Group = 0; previous->Number = 0; previous->Reserved = 0; }
++    return TRUE;
+ }
+ 
+ 

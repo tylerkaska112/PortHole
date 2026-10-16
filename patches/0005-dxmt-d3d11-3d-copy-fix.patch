@@ -1,0 +1,224 @@
+diff --git a/src/d3d11/d3d11_context_impl.cpp b/src/d3d11/d3d11_context_impl.cpp
+index 1e2a92f..84f02be 100644
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -8,6 +8,7 @@ since it is for internal use only
+ */
+ #include "Metal.hpp"
+ #include "config/config.hpp"   /* ml869 */
++#include "f4_diag.hpp"
+ #include <deque>   /* ml1256 */
+ #include "d3d11_annotation.hpp"
+ #include "d3d11_context.hpp"
+@@ -357,7 +358,13 @@ public:
+       DstSubresource(DstSubresource),
+       SrcFormat(Src_.FormatDescription),
+       DstFormat(Dst_.FormatDescription) {
+-    if (Dst_.Dimension != Src_.Dimension)
++    /* f4-0006: D3D11 allows CopySubresourceRegion between a 2D texture and one slice of a 3D texture (either way);
++     * Factorio builds its day/night colour table this way (256x16 render target -> sixteen 16x16 slices of a 3D LUT).
++     * Dropping those copies left the LUT unchanged, i.e. a black world at dusk and dawn. Every other mixed pair is still dropped. */
++    const bool mixed_2d_3d =
++        (Dst_.Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D && Src_.Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D) ||
++        (Dst_.Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D && Src_.Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D);
++    if (Dst_.Dimension != Src_.Dimension && !mixed_2d_3d)
+       return;
+ 
+     if (SrcFormat.PixelFormat == WMTPixelFormatInvalid)
+@@ -365,69 +372,44 @@ public:
+     if (DstFormat.PixelFormat == WMTPixelFormatInvalid)
+       return;
+ 
+-    switch (Dst_.Dimension) {
+-    default: {
++    auto describe = [](BlitObject &O, UINT Sub, Subresource &Out) -> bool {
++      switch (O.Dimension) {
++      case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
++        D3D11_TEXTURE1D_DESC &d = O.Texture1DDesc;
++        Out.Format = d.Format;
++        Out.MipLevel = Sub % d.MipLevels;
++        Out.ArraySlice = Sub / d.MipLevels;
++        Out.Width = std::max(1u, d.Width >> Out.MipLevel);
++        Out.Height = 1;
++        Out.Depth = 1;
++        return true;
++      }
++      case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
++        D3D11_TEXTURE2D_DESC1 &d = O.Texture2DDesc;
++        Out.Format = d.Format;
++        Out.MipLevel = Sub % d.MipLevels;
++        Out.ArraySlice = Sub / d.MipLevels;
++        Out.Width = std::max(1u, d.Width >> Out.MipLevel);
++        Out.Height = std::max(1u, d.Height >> Out.MipLevel);
++        Out.Depth = 1;
++        return true;
++      }
++      case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
++        D3D11_TEXTURE3D_DESC1 &d = O.Texture3DDesc;
++        Out.Format = d.Format;
++        Out.MipLevel = Sub;
++        Out.ArraySlice = 0;
++        Out.Width = std::max(1u, d.Width >> Out.MipLevel);
++        Out.Height = std::max(1u, d.Height >> Out.MipLevel);
++        Out.Depth = std::max(1u, d.Depth >> Out.MipLevel);
++        return true;
++      }
++      default:
++        return false;
++      }
++    };
++    if (!describe(Src_, SrcSubresource, Src) || !describe(Dst_, DstSubresource, Dst))
+       return;
+-    }
+-    case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+-      D3D11_TEXTURE1D_DESC &dst_desc = Dst_.Texture1DDesc;
+-      D3D11_TEXTURE1D_DESC &src_desc = Src_.Texture1DDesc;
+-
+-      Src.Format = src_desc.Format;
+-      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
+-      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
+-      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
+-      Src.Height = 1;
+-      Src.Depth = 1;
+-
+-      Dst.Format = dst_desc.Format;
+-      Dst.MipLevel = DstSubresource % dst_desc.MipLevels;
+-      Dst.ArraySlice = DstSubresource / dst_desc.MipLevels;
+-      Dst.Width = std::max(1u, dst_desc.Width >> Dst.MipLevel);
+-      Dst.Height = 1;
+-      Dst.Depth = 1;
+-      break;
+-    }
+-    case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+-      D3D11_TEXTURE2D_DESC1 &dst_desc = Dst_.Texture2DDesc;
+-      D3D11_TEXTURE2D_DESC1 &src_desc = Src_.Texture2DDesc;
+-
+-      Src.Format = src_desc.Format;
+-      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
+-      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
+-      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
+-      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
+-      Src.Depth = 1;
+-
+-      Dst.Format = dst_desc.Format;
+-      Dst.MipLevel = DstSubresource % dst_desc.MipLevels;
+-      Dst.ArraySlice = DstSubresource / dst_desc.MipLevels;
+-      Dst.Width = std::max(1u, dst_desc.Width >> Dst.MipLevel);
+-      Dst.Height = std::max(1u, dst_desc.Height >> Dst.MipLevel);
+-      Dst.Depth = 1;
+-      break;
+-    }
+-    case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+-      D3D11_TEXTURE3D_DESC1 &dst_desc = Dst_.Texture3DDesc;
+-      D3D11_TEXTURE3D_DESC1 &src_desc = Src_.Texture3DDesc;
+-
+-      Src.Format = src_desc.Format;
+-      Src.MipLevel = SrcSubresource;
+-      Src.ArraySlice = 0;
+-      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
+-      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
+-      Src.Depth = std::max(1u, src_desc.Depth >> Src.MipLevel);
+-
+-      Dst.Format = dst_desc.Format;
+-      Dst.MipLevel = DstSubresource;
+-      Dst.ArraySlice = 0;
+-      Dst.Width = std::max(1u, dst_desc.Width >> Dst.MipLevel);
+-      Dst.Height = std::max(1u, dst_desc.Height >> Dst.MipLevel);
+-      Dst.Depth = std::max(1u, dst_desc.Depth >> Dst.MipLevel);
+-
+-      break;
+-    }
+-    }
+ 
+     D3D11_BOX SrcBox;
+ 
+@@ -1247,6 +1229,8 @@ public:
+     BlitObject Dst(device, pDstResource);
+     BlitObject Src(device, pSrcResource);
+ 
++    if (Dst.Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D || Src.Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D)
++      F4_DIAG(200, "CopyResource dstDim=", (unsigned)Dst.Dimension, " srcDim=", (unsigned)Src.Dimension);
+     switch (Dst.Dimension) {
+     case D3D11_RESOURCE_DIMENSION_UNKNOWN:
+       break;
+@@ -1309,6 +1293,12 @@ public:
+     BlitObject Dst(device, pDstResource);
+     BlitObject Src(device, pSrcResource);
+ 
++    if (Dst.Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D || Src.Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D)
++      F4_DIAG(200, "CopySubresourceRegion dstDim=", (unsigned)Dst.Dimension, " dstSub=", DstSubresource, " dst=(", DstX, ",",
++              DstY, ",", DstZ, ") srcDim=", (unsigned)Src.Dimension, " srcSub=", SrcSubresource, " box=",
++              pSrcBox ? (int)pSrcBox->left : -1, ",", pSrcBox ? (int)pSrcBox->top : -1, ",", pSrcBox ? (int)pSrcBox->front : -1,
++              "..", pSrcBox ? (int)pSrcBox->right : -1, ",", pSrcBox ? (int)pSrcBox->bottom : -1, ",",
++              pSrcBox ? (int)pSrcBox->back : -1);
+     switch (Dst.Dimension) {
+     case D3D11_RESOURCE_DIMENSION_UNKNOWN:
+       break;
+@@ -1375,6 +1365,11 @@ public:
+ 
+     BlitObject Dst(device, pDstResource);
+ 
++    if (Dst.Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D)
++      F4_DIAG(200, "UpdateSubresource dstSub=", DstSubresource, " box=", pDstBox ? (int)pDstBox->left : -1, ",",
++              pDstBox ? (int)pDstBox->top : -1, ",", pDstBox ? (int)pDstBox->front : -1, "..",
++              pDstBox ? (int)pDstBox->right : -1, ",", pDstBox ? (int)pDstBox->bottom : -1, ",",
++              pDstBox ? (int)pDstBox->back : -1, " rowPitch=", SrcRowPitch, " depthPitch=", SrcDepthPitch);
+     if (Dst.Dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
+       D3D11_BUFFER_DESC desc;
+       ((ID3D11Buffer *)pDstResource)->GetDesc(&desc);
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 3cb10ab..c3fc0e9 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -28,6 +28,7 @@
+ #include <algorithm>
+ #include <unordered_map>
+ #include "config/config.hpp"   /* ml670: d3d11.mipClampBC */
++#include "f4_diag.hpp"
+ #include "d3d11_4.h"
+ #include "util_win32_compat.h"
+ 
+@@ -1073,6 +1074,9 @@ public:
+     if ((pDesc->MiscFlags & D3D11_RESOURCE_MISC_TILED))
+       return E_INVALIDARG; // not supported yet
+ 
++    F4_DIAG(64, "CreateTexture3D ", pDesc->Width, "x", pDesc->Height, "x", pDesc->Depth, " mips=", pDesc->MipLevels,
++            " fmt=", (unsigned)pDesc->Format, " usage=", (unsigned)pDesc->Usage, " bind=", pDesc->BindFlags,
++            " cpu=", pDesc->CPUAccessFlags, " misc=", pDesc->MiscFlags, " init=", pInitialData ? 1 : 0);
+     try {
+       switch (pDesc->Usage) {
+       case D3D11_USAGE_DEFAULT:
+diff --git a/src/d3d11/d3d11_resource_view_helper.cpp b/src/d3d11/d3d11_resource_view_helper.cpp
+index 4d1214d..5dc7317 100644
+--- a/src/d3d11/d3d11_resource_view_helper.cpp
++++ b/src/d3d11/d3d11_resource_view_helper.cpp
+@@ -1,3 +1,4 @@
++#include "f4_diag.hpp"
+ #include "dxmt_format.hpp"
+ #include "d3d11_resource.hpp"
+ 
+@@ -468,6 +469,8 @@ HRESULT InitializeAndNormalizeViewDescriptor(
+     break;
+   }
+   case D3D11_RTV_DIMENSION_TEXTURE3D: {
++    F4_DIAG(64, "CreateRTV tex3d mip=", ViewDesc.Texture3D.MipSlice, " firstW=", ViewDesc.Texture3D.FirstWSlice, " wsize=",
++            ViewDesc.Texture3D.WSize, " depth=", ArraySize);
+     ArraySize = std::max(ArraySize >> ViewDesc.Texture3D.MipSlice, 1u); 
+     if (~ViewDesc.Texture3D.WSize == 0)
+       ViewDesc.Texture3D.WSize = ArraySize - ViewDesc.Texture3D.FirstWSlice;
+diff --git a/src/d3d11/f4_diag.hpp b/src/d3d11/f4_diag.hpp
+new file mode 100644
+index 0000000..8c43250
+--- /dev/null
++++ b/src/d3d11/f4_diag.hpp
+@@ -0,0 +1,10 @@
++#pragma once
++/* f4-0005: rate-limited diagnostics for 3D-texture traffic (dusk/dawn colour-table blend investigation). */
++#include <atomic>
++#include "log/log.hpp"
++#define F4_DIAG(limit, ...)                                                                            \
++  do {                                                                                                 \
++    static std::atomic<unsigned> f4_diag_n{0};                                                         \
++    if (f4_diag_n.fetch_add(1, std::memory_order_relaxed) < (limit))                                   \
++      ERR("[f4-3d] ", __VA_ARGS__);                                                                    \
++  } while (0)

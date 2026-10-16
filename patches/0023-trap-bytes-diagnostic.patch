@@ -1,0 +1,47 @@
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -1911,6 +1911,44 @@
+                                     gn[gi + 1], (unsigned long long)gregs[gi + 1],
+                                     gn[gi + 2], (unsigned long long)gregs[gi + 2],
+                                     gn[gi + 3], (unsigned long long)gregs[gi + 3]);
++                        /* Porthole 0023 (diagnostic): the guest BYTES around RIP and the top of the guest
++                         * stack, for a guest trap in a 32-bit process. Ubisoft Connect's client (upc.exe,
++                         * anti-tamper sections .ubx0-.ubx2) dies right after a trap here and the log said
++                         * nothing about what the trapping instruction or its handler was. x19 is FEX's
++                         * guest-memory base (0x7200000000 in the dump above); a 32-bit guest address is
++                         * an offset from it. Read-only, first 16 traps only. */
++                        {
++                            static int bytes_dumped = 0;
++                            uint64_t mbase = bs.__x[19];
++                            if (bytes_dumped < 16 && grip > 0x10000 && grip < 0x100000000ull &&
++                                mbase >= 0x1000000000ull && (mbase & 0xffffffffull) == 0)
++                            {
++                                unsigned char code[96], stk[128];
++                                mach_vm_size_t c_got = 0, s_got = 0;
++                                int c_ok = mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(mbase + grip - 32),
++                                                                   sizeof(code), (mach_vm_address_t)code, &c_got ) == KERN_SUCCESS;
++                                int s_ok = gregs[4] > 0x10000 && gregs[4] < 0x100000000ull &&
++                                           mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(mbase + gregs[4]),
++                                                                   sizeof(stk), (mach_vm_address_t)stk, &s_got ) == KERN_SUCCESS;
++                                bytes_dumped++;
++                                if (c_ok)
++                                {
++                                    char hex[sizeof(code) * 2 + 1]; unsigned k;
++                                    for (k = 0; k < sizeof(code); k++) snprintf( hex + 2 * k, 3, "%02x", code[k] );
++                                    dprintf( STDERR_FILENO, "[trap-bytes] #%d guest 0x%llx-32..+64 (RIP is the 33rd byte): %s\n",
++                                             bytes_dumped, (unsigned long long)grip, hex );
++                                }
++                                else
++                                    dprintf( STDERR_FILENO, "[trap-bytes] #%d guest 0x%llx unreadable\n", bytes_dumped, (unsigned long long)grip );
++                                if (s_ok)
++                                {
++                                    char hex[sizeof(stk) * 2 + 1]; unsigned k;
++                                    for (k = 0; k < sizeof(stk); k++) snprintf( hex + 2 * k, 3, "%02x", stk[k] );
++                                    dprintf( STDERR_FILENO, "[trap-bytes] #%d guest stack at 0x%llx: %s\n",
++                                             bytes_dumped, (unsigned long long)gregs[4], hex );
++                                }
++                            }
++                        }
+                         /* Host x0..x30 too: FEX's SRA mapping is not assumed anywhere
+                          * here, so print both and identify the value offline. */
+                         for (gi = 0; gi < 31; gi += 4)

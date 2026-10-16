@@ -1,0 +1,251 @@
+name: Porthole
+options:
+  bundleIdPrefix: site.portholehq
+  deploymentTarget: { iOS: "18.0" }
+  createIntermediateGroups: true
+configFiles:
+  Debug: Config/Porthole.xcconfig
+  Release: Config/Porthole.xcconfig
+packages:
+  LauncherCore:
+    # The on-device signer, vault and update pipeline.
+    path: "../Packages/LauncherCore"
+settings:
+  base:
+    MARKETING_VERSION: 1.0.0          # one version for the app and its extension
+    CURRENT_PROJECT_VERSION: 480
+    SWIFT_VERSION: "5.0"
+    SWIFT_OPTIMIZATION_LEVEL: "-O"      # also in Debug builds (the release scripts build Release; Debug is still available): the pairing maths is ~15x slower unoptimised, and the iPhone will not wait for it
+    CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+    CLANG_ENABLE_OBJC_ARC: YES
+    CLANG_ENABLE_MODULES: YES
+    ENABLE_DEBUG_DYLIB: NO            # Xcode's debug-dylib split adds Foo.debug.dylib + __preview.dylib; a plain executable is simpler to sign and to JIT
+    ENABLE_PREVIEWS: NO
+targets:
+  Porthole:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      # The app icon and the porthole picture in the top bar (both drawn by tools/make_icon.swift).
+      - path: Assets.xcassets
+      - path: Runtime
+        excludes: ["PROVENANCE.md", "SHA256SUMS", "Bridging-Header.h"]
+      # Built runtime, staged by tools/stage_runtime.sh (symlinks into the external build drive). Folder references keep the directory layout the runtime expects.
+      - { path: RuntimeStage/Resources/nls,                type: folder, buildPhase: resources }
+      - { path: RuntimeStage/Resources/aarch64-windows,    type: folder, buildPhase: resources }
+      - { path: RuntimeStage/Resources/arm64ec-windows,    type: folder, buildPhase: resources }
+      - { path: RuntimeStage/Resources/x86_64-vcruntime,   type: folder, buildPhase: resources }
+      - { path: RuntimeStage/Resources/legal,              type: folder, buildPhase: resources }
+      - { path: RuntimeStage/Resources/licenses,           type: folder, buildPhase: resources }
+      - { path: RuntimeStage/Resources/i386-windows,       type: folder, buildPhase: resources }
+      - { path: RuntimeStage/Resources/d3d12,              type: folder, buildPhase: resources }
+      # OpenGL (patch 0082): the desktop OpenGL libraries and the LuaJIT used by LOVE games.
+      - { path: RuntimeStage/Resources/gl,                 type: folder, buildPhase: resources }
+      - { path: RuntimeStage/Resources/compat,             type: folder, buildPhase: resources }
+      - { path: RuntimeStage/Resources/prefix-template.tar.gz, buildPhase: resources }
+      - { path: RuntimeStage/Resources/cacert.pem,         buildPhase: resources }
+      - { path: RuntimeStage/Resources/madeira-jit.js,     buildPhase: resources }
+      - { path: "Shortcuts/Porthole Cellular Off.shortcut", buildPhase: resources }
+      - { path: "Shortcuts/Porthole Cellular On.shortcut",  buildPhase: resources }
+      # The licences and credits that travel with the app (shown in Settings > About > Licences).
+      - { path: ../LICENSE,                  buildPhase: resources }
+      - { path: ../LICENSE-EXCEPTION.md,     buildPhase: resources }
+      - { path: ../CREDITS.md,               buildPhase: resources }
+      - { path: ../docs/SOURCE.md,           buildPhase: resources }
+      - { path: ../docs/notices/StikJIT.md,  buildPhase: resources }
+      - { path: ../docs/notices/MPL-2.0-StikJIT.txt, buildPhase: resources }
+      - { path: ../docs/notices/StikJIT-rust-libraries.txt, buildPhase: resources }
+    dependencies:
+      - package: LauncherCore
+      - target: F4JITHelper
+        embed: true
+      - target: F4Tunnel
+        embed: true
+      - target: F4Activity
+        embed: true
+      # Also linked here (not only in the helper): the on-device installer calls idevice's C functions from the main app.
+      - framework: Vendor/StikJIT.xcframework
+        embed: true
+        codeSign: true
+    info:
+      path: Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleDisplayName: Porthole
+        # Per-build identity, from Config/*.xcconfig (see Identity.swift in LauncherCore).
+        PortholeBuiltBundleID: $(PRODUCT_BUNDLE_IDENTIFIER)
+        PortholeKeychainService: $(PORTHOLE_KEYCHAIN_SERVICE)
+        PortholeStorageFolder: $(PORTHOLE_STORAGE_FOLDER)
+        PortholeHubURL: $(PORTHOLE_HUB_URL)
+        PortholeHubAppID: $(PORTHOLE_HUB_APP_ID)
+        PortholeReleaseKey: $(PORTHOLE_RELEASE_KEY)
+        PortholeEngine: $(PORTHOLE_ENGINE_ID)
+        PortholeEngineMadeira: $(PORTHOLE_ENGINE_MADEIRA)
+        PortholeSourceURL: $(PORTHOLE_SOURCE_URL)
+        LSRequiresIPhoneOS: true
+        # Game Mode (iOS 18+): iOS gives a full-screen game the highest priority on the processor and graphics chip and trims background work. Needs both keys.
+        LSApplicationCategoryType: public.app-category.games
+        GCSupportsGameMode: true
+        UIRequiredDeviceCapabilities: [arm64]
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CADisableMinimumFrameDurationOnPhone: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        LSApplicationQueriesSchemes: [stikjit, stikdebug]
+        # Home Screen shortcuts: porthole://play?exe=<Windows path> (a game's page copies the link).
+        CFBundleURLTypes: [{ CFBundleURLName: porthole, CFBundleURLSchemes: [porthole] }]
+        BGTaskSchedulerPermittedIdentifiers: ["$(PRODUCT_BUNDLE_IDENTIFIER).download.*", "$(PRODUCT_BUNDLE_IDENTIFIER).pairing"]
+        # On-device pairing (iOS 27): the app advertises itself on the local network so this iPhone's Settings can pair with it.
+        NSLocalNetworkUsageDescription: "Porthole uses the local network to pair this iPhone with itself so JIT can be switched on without a computer."
+        NSBonjourServices: ["_remotepairing-pairable-host._tcp"]
+        NSSupportsLiveActivities: true                  # the download card on the lock screen (F4Activity)
+        NSSupportsLiveActivitiesFrequentUpdates: true   # once a second while downloading
+        UIBackgroundModes: [audio]          # silent audio keeps pairing alive while you are in Settings, and downloads running after the app is left (DownloadKeepAlive)
+        # Internet traffic must be https. Local-network addresses (a Hub on the LAN) may still be plain http.
+        NSAppTransportSecurity: { NSAllowsLocalNetworking: true }
+    entitlements:
+      path: F4.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
+        com.apple.developer.kernel.extended-virtual-addressing: true
+        get-task-allow: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PORTHOLE_BUNDLE_ID)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_OBJC_BRIDGING_HEADER: Runtime/Bridging-Header.h
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_ALLOWED: NO       # the Launcher / your sideloader signs it
+        # Runtime sources live next to the build (external drive); FEX headers are needed by FEXBridge.mm
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/Runtime"
+          # The glue includes "../../build/madeira_cfg.h" relative to the original app/Madeira folder; this makes that resolve inside the pinned snapshot.
+          - "$(SRCROOT)/../vendor/Madeira/app/Madeira"
+        LIBRARY_SEARCH_PATHS: ["$(inherited)", "$(SRCROOT)/RuntimeStage/lib"]
+        OTHER_LDFLAGS:
+          - "-ldxmt_combined"
+          - "-lgmp"
+          - "-llzma"
+          - "-lgnutls"
+          - "-lhogweed"
+          - "-lnettle"
+          - "-lntdll_unix"
+          - "-lwin32u_unix"
+          - "-lwineserver"
+          - "-lavcodec"
+          - "-lavformat"
+          - "-lavutil"
+          - "-lswresample"
+          - "-lc++"
+          - "-lsqlite3"
+          - "-lz"
+          - "-framework IOKit"
+          - "-framework OpenGLES"        # the OpenGL ES backend of the OpenGL driver (Runtime/Winios/WiniosGL.m)
+          - "-framework IOSurface"
+          - "-framework Metal"
+          - "-framework MetalFX"
+          - "-framework QuartzCore"
+          - "-framework VideoToolbox"
+          - "-framework CoreMedia"
+          - "-framework CoreVideo"
+          - "-framework AudioToolbox"
+          - "-framework CoreFoundation"
+      configs:
+        Release:
+          # Xcode turns this on for Debug and off for Release. The engine finds Wine's C functions (FreeType, Direct3D, the display shim) in this executable by
+          # name with dlsym; without -rdynamic the linker drops the ~11,600 that nothing in the app calls directly, and a guest fails at its first lookup.
+          LD_EXPORT_GLOBAL_SYMBOLS: YES
+          GCC_SYMBOLS_PRIVATE_EXTERN: NO      # Release hides the app's own C glue (winios_*, jit_*, wine_*) the same way; Debug exports it
+
+  F4JITHelper:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Helper
+        excludes: ["Info.plist"]
+      - path: Sources/Shared
+        excludes: ["DownloadActivityAttributes.swift"]      # the download card's types belong to the app and F4Activity only
+      - { path: RuntimeStage/Resources/madeira-jit.js, buildPhase: resources }
+    dependencies:
+      - framework: Vendor/StikJIT.xcframework
+        embed: true
+        codeSign: true
+    info:
+      path: Helper/Info.plist
+      properties:
+        CFBundleDisplayName: JIT Helper
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.ar.viewer   # only a vehicle: lets the host start the extension as its own process on demand
+          NSExtensionPrincipalClass: JITRequestHandler
+          NSExtensionAttributes:
+            NSExtensionActivationRule: FALSEPREDICATE       # never offered to anything else
+        XPCService:
+          ServiceType: Application
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PORTHOLE_BUNDLE_ID).jithelper
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_ALLOWED: NO
+        ENABLE_DEBUG_DYLIB: NO
+        LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks"]
+
+  F4Tunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Tunnel
+    info:
+      path: Tunnel/Info.plist
+      properties:
+        CFBundleDisplayName: JIT Tunnel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    # Entitlement com.apple.developer.networking.networkextension = [packet-tunnel-provider] comes from the provisioning profile at signing time
+    # (CODE_SIGNING_ALLOWED is NO in this project); the host app needs the same one to create the VPN configuration.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PORTHOLE_BUNDLE_ID).tunnel
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_ALLOWED: NO
+        ENABLE_DEBUG_DYLIB: NO
+
+  # The download card (Live Activity): percentage, size, speed and time left on the lock screen and in the Dynamic Island, with Pause / Resume / Cancel.
+  # Optional like the other two: take it out while signing to spend one App ID less; iOS's own download card is used then.
+  F4Activity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Activity
+      - path: Sources/Shared/DownloadActivityAttributes.swift
+    info:
+      path: Activity/Info.plist
+      properties:
+        CFBundleDisplayName: Downloads
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PORTHOLE_BUNDLE_ID).activity
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_ALLOWED: NO
+        ENABLE_DEBUG_DYLIB: NO
+        LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks"]

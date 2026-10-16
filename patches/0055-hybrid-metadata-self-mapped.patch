@@ -1,0 +1,38 @@
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -1901,6 +1901,7 @@
+         }
+     }
+     if (!pNotifyMapViewOfSection) return;
++    int self_mapped = !NtCurrentTeb()->Tib.ArbitraryUserPointer;
+     if (!NtCurrentTeb()->Tib.ArbitraryUserPointer)
+     {
+         /* Porthole 0049: this used to return here. FEX does not use the pointer (HandleImageMap reads the PE headers at the address),
+@@ -1917,6 +1918,27 @@
+         if (skip_qs < 20)
+         { skip_qs++; ERR( "[map-notify] SKIP (not an image section) addr=%p size=%p\n", addr, (void *)size ); }
+         return;
++    }
++    /* Porthole 0055: an ARM64EC image a program maps itself (not the loader) has its hybrid-metadata dispatch slots (__os_arm64x_dispatch_call and
++     * the rest) still zero, because only the loader fills them in (update_load_config). Black Ops 3's protection maps clean copies of System32 DLLs
++     * and runs code in them: with the x64-compatible gdi32 its first call reached ARM64EC code that calls through a zero slot (`WEDGE pc=0x0`
++     * `exec-relative slot ... = 0x0`, gdi32.dll+0x544e4). Fill the slots like the loader does; the protect call in it syncs the pool copy. */
++    if (self_mapped && info.Machine == IMAGE_FILE_MACHINE_AMD64)
++    {
++        IMAGE_NT_HEADERS *nt = RtlImageNtHeader( addr );
++        IMAGE_LOAD_CONFIG_DIRECTORY *cfg;
++        ULONG cfg_size;
++
++        if (nt && (cfg = RtlImageDirectoryEntryToData( addr, TRUE, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG, &cfg_size )))
++        {
++            cfg_size = min( cfg_size, cfg->Size );
++            if (cfg_size > offsetof( IMAGE_LOAD_CONFIG_DIRECTORY, CHPEMetadataPointer ) &&
++                cfg->CHPEMetadataPointer > (ULONG_PTR)addr && cfg->CHPEMetadataPointer < (ULONG_PTR)addr + nt->OptionalHeader.SizeOfImage)
++            {
++                ERR( "[map-notify] 0055 hybrid metadata for the self-mapped ARM64EC image %p\n", addr );
++                arm64ec_update_hybrid_metadata( addr, nt, (void *)cfg->CHPEMetadataPointer );
++            }
++        }
+     }
+     ios_note_big_image( addr, size );
+     status = pNotifyMapViewOfSection( NULL, addr, NULL, size, alloc, protect );

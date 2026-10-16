@@ -1,0 +1,92 @@
+--- a/dlls/kernelbase/debug.c
++++ b/dlls/kernelbase/debug.c
+@@ -453,6 +453,11 @@
+ LPTOP_LEVEL_EXCEPTION_FILTER WINAPI DECLSPEC_HOTPATCH SetUnhandledExceptionFilter(
+     LPTOP_LEVEL_EXCEPTION_FILTER filter )
+ {
++    {
++        static LONG set_n;   /* Porthole 0059 */
++        if (set_n < 30 && InterlockedIncrement( &set_n ) <= 30)
++            ERR( "[uef] 0059 SetUnhandledExceptionFilter %p (was %p)\n", filter, top_filter );
++    }
+     return InterlockedExchangePointer( (void **)&top_filter, filter );
+ }
+ 
+@@ -743,7 +748,41 @@
+     VirtualProtect( rsrc, size, PAGE_READWRITE, &old_prot );
+     return TRUE;
+ }
++
++
++/* Porthole 0060 (diagnostic): the code of the program's own unhandled-exception filter (Black Ops 3's answers 0 = continue search for a breakpoint;
++ * on Windows it must handle it). Jump-linked blocks, breadth first, 96 bytes each. */
++static void ios_dump_filter_code( ULONG_PTR start )
++{
++    ULONG_PTR queue[160];
++    unsigned qn = 0, qi = 0, i;
+ 
++    queue[qn++] = start;
++    while (qi < qn && qi < 140)
++    {
++        unsigned char blk[96]; char row[sizeof(blk) * 2 + 1];
++        ULONG_PTR a = queue[qi++];
++        SIZE_T got = 0;
++        if (NtReadVirtualMemory( GetCurrentProcess(), (void *)a, blk, sizeof(blk), &got ) || got != sizeof(blk)) continue;
++        for (i = 0; i < sizeof(blk); i++) sprintf( row + i * 2, "%02x", blk[i] );
++        ERR( "[uef-dump] 0060 block %p: %s\n", (void *)a, row );
++        for (i = 0; i + 5 <= sizeof(blk); i++)
++        {
++            int off, len;
++            if (blk[i] == 0xe9) { off = 1; len = 5; }
++            else if (blk[i] == 0x0f && i + 6 <= sizeof(blk) && blk[i + 1] >= 0x80 && blk[i + 1] <= 0x8f) { off = 2; len = 6; }
++            else continue;
++            {
++                LONG rel; ULONG_PTR t; unsigned z;
++                memcpy( &rel, blk + i + off, 4 );
++                t = a + i + len + (LONG_PTR)rel;
++                if (t < start - 0x40000000 || t > start + 0x40000000) continue;
++                for (z = 0; z < qn; z++) if (queue[z] == t) break;
++                if (z == qn && qn < ARRAY_SIZE(queue)) queue[qn++] = t;
++            }
++        }
++    }
++}
+ 
+ /*******************************************************************
+  *         UnhandledExceptionFilter   (kernelbase.@)
+@@ -773,9 +812,34 @@
+         }
+ 
+         nested = rec->ExceptionFlags & EXCEPTION_NESTED_CALL;
++        {
++            static LONG uef_n;   /* Porthole 0059 */
++            if (uef_n < 30 && InterlockedIncrement( &uef_n ) <= 30)
++                ERR( "[uef] 0059 UnhandledExceptionFilter code=%lx at %p: top_filter=%p nested=%d\n", rec->ExceptionCode, rec->ExceptionAddress, top_filter, !!nested );
++        }
+         if (top_filter && !nested)
+         {
+-            LONG ret = top_filter( epointers );
++            LONG ret;
++            {
++                static LONG dumped;
++                if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && !dumped && InterlockedIncrement( &dumped ) == 1)
++                {
++                    unsigned char r[0x98]; char row[sizeof(r) * 2 + 1]; unsigned q;
++                    ios_dump_filter_code( (ULONG_PTR)top_filter );
++                    memcpy( r, rec, sizeof(r) );
++                    for (q = 0; q < sizeof(r); q++) sprintf( row + q * 2, "%02x", r[q] );
++                    ERR( "[uef-dump] 0060 exception record: %s\n", row );
++                    ERR( "[uef-dump] 0060 context: Rip=%p Rsp=%p Rbp=%p Rax=%p Rcx=%p Rdx=%p EFlags=%lx\n", (void *)(ULONG_PTR)epointers->ContextRecord->Rip,
++                         (void *)(ULONG_PTR)epointers->ContextRecord->Rsp, (void *)(ULONG_PTR)epointers->ContextRecord->Rbp,
++                         (void *)(ULONG_PTR)epointers->ContextRecord->Rax, (void *)(ULONG_PTR)epointers->ContextRecord->Rcx,
++                         (void *)(ULONG_PTR)epointers->ContextRecord->Rdx, epointers->ContextRecord->EFlags );
++                }
++            }
++            ret = top_filter( epointers );
++            {
++                static LONG uef_r_n;
++                if (uef_r_n < 30 && InterlockedIncrement( &uef_r_n ) <= 30) ERR( "[uef] 0059 top_filter %p returned %ld\n", top_filter, ret );
++            }
+             if (ret != EXCEPTION_CONTINUE_SEARCH) return ret;
+         }
+ 

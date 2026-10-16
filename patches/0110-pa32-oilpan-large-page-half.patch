@@ -1,0 +1,85 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-11 22:50:51
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-11 22:50:51
+@@ -1470,7 +1470,12 @@
+  * Oilpan claims but never uses. See patches/0018-pa-pool32-soft.md. */
+ #define IOS_PA32_OILPAN_BASE 0x7000000000ULL
+ #define IOS_PA32_OILPAN_REAL 0x100000000ULL
++/* 0110: cppgc's caged heap keeps its LARGE pages in the upper half of its reservation (the first commit seen is base + 16GB + 8KB: RDR2's Chromium,
++ * 2026-10-11, `libcef` int3 at a commit of 0x7400002000 with 0x7400000000 as the region base). 2GB there are real too; the emulator's band starts above them. */
++#define IOS_PA32_OILPAN_HI_BASE 0x7400000000ULL
++#define IOS_PA32_OILPAN_HI_REAL 0x80000000ULL
+ static int ios_pa32_oilpan_hold;
++static int ios_pa32_oilpan_hold_hi;
+ static NTSTATUS ios_pa32_cage_grant( HANDLE process, PVOID *ret, SIZE_T *size_ptr, SIZE_T req_size, ULONG type, ULONG protect )
+ {
+     SIZE_T csz = IOS_CAGE_REAL_SIZE;
+@@ -1485,6 +1490,16 @@
+         ios_pa32_oilpan_hold = 0;
+         st = allocate_virtual_memory( &pick, &csz, type, protect, 0, 0, 0, 0 );
+         if (!st) { *ret = pick; *size_ptr = req_size; }   /* the real view is the first 4GB; the guest is told it has all 32GB */
++        if (!st && ios_pa32_oilpan_hold_hi)
++        {
++            void *hp = (void *)(uintptr_t)IOS_PA32_OILPAN_HI_BASE;
++            SIZE_T hsz = IOS_PA32_OILPAN_HI_REAL;
++            NTSTATUS hst;
++            munmap( hp, hsz );
++            ios_pa32_oilpan_hold_hi = 0;
++            hst = allocate_virtual_memory( &hp, &hsz, type, protect, 0, 0, 0, 0 );
++            dprintf( 2, "[pa32] patch0110 upper half of Oilpan's reservation: %p real=0x%llx st=0x%x\n", hp, (unsigned long long)hsz, (unsigned)hst );
++        }
+         dprintf( 2, "[pa32] patch0018 Oilpan caged-heap ask (32GB) served from the slot base -> %p real=0x%llx st=0x%x\n",
+                  pick, (unsigned long long)csz, (unsigned)st );
+         return st;
+@@ -24374,15 +24389,15 @@
+      * band (ios_steer_slot/top) and stay out of the pool. The band is only moved if that 16GB is free right now; otherwise nothing changes. */
+     if (ios_pa32_soft_enabled())
+     {
+-        mach_vm_address_t probe = 0x7400000000ull;
+-        kern_return_t pk = mach_vm_map( mach_task_self(), &probe, 0x400000000ull, 0xffff, VM_FLAGS_FIXED,
++        mach_vm_address_t probe = 0x7480000000ull;     /* 0110: the 2GB below it are Oilpan's large-page half */
++        kern_return_t pk = mach_vm_map( mach_task_self(), &probe, 0x380000000ull, 0xffff, VM_FLAGS_FIXED,
+                                         MEMORY_OBJECT_NULL, 0, 0, PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY );
+         if (pk == KERN_SUCCESS)
+         {
+-            mach_vm_deallocate( mach_task_self(), probe, 0x400000000ull );
++            mach_vm_deallocate( mach_task_self(), probe, 0x380000000ull );
+             /* 0109: 16GB again. 8GB (0.50.221) was full at boot of the Steam client alone, and a single-process Chromium adds 100+ threads to it. */
+-            plan[0].lo = 0x7400000000ull; plan[0].hi = 0x77ffffffffull; plan[0].size = 0x400000000ull;
+-            plan[0].what = "Porthole 0109: 16GB band below the 32GB pool";
++            plan[0].lo = 0x7480000000ull; plan[0].hi = 0x77ffffffffull; plan[0].size = 0x380000000ull;
++            plan[0].what = "Porthole 0110: 14GB band below the 32GB pool, above Oilpan's large-page half";
+             ios_fex_band_reloc_wanted = 1;
+         }
+         else
+@@ -24430,7 +24445,7 @@
+         /* Porthole patch 0018: the "CoreAnimation range" is only where 32GB of tag-51 chunks happened to land in free space at start-up (first-fit,
+          * so its top, 0x7818000000 in the field log, depends on how much free space lies below). It overlaps the band and the pool this patch needs, and
+          * enforcing it moved the band to 0x7818000000, which left no 32GB hole. With the opt-in the band is kept where the probe proved the 16GB free. */
+-        if (ios_fex_band_reloc_wanted && addr == 0x7400000000ull && size == 0x400000000ull)
++        if (ios_fex_band_reloc_wanted && addr == 0x7480000000ull && size == 0x380000000ull)
+             dprintf( 2, "[pa32] patch0018 keeping the band at 0x7400000000 although it overlaps the measured CoreAnimation span 0x%llx..0x%llx\n",
+                      ios_layerkit_lo, ios_layerkit_hi );
+         else
+@@ -24544,7 +24559,7 @@
+             setenv( "WINE_IOS_FEX_ARENA_VERSION", "1", 1 );
+             ios_fex_arena_base_unix = (ULONG_PTR)base;
+             ios_fex_arena_end_unix  = (ULONG_PTR)base + size;
+-            if (ios_fex_band_reloc_wanted && (ULONG_PTR)base == 0x7400000000ull)
++            if (ios_fex_band_reloc_wanted && (ULONG_PTR)base == 0x7480000000ull)
+             {
+                 ios_fex_band_relocated = 1;
+                 ios_layerkit_enforce = 0;   /* the measured span covers the band and the pool; see the note at the arena placement */
+@@ -24559,6 +24574,13 @@
+                                                     MEMORY_OBJECT_NULL, 0, 0, PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY );
+                     if (hk == KERN_SUCCESS) ios_pa32_oilpan_hold = 1;
+                     dprintf( 2, "[pa32] patch0018 4GB held at 0x%llx for Oilpan's caged heap: kr=%d\n", (unsigned long long)IOS_PA32_OILPAN_BASE, (int)hk );
++                    {
++                        mach_vm_address_t hh = IOS_PA32_OILPAN_HI_BASE;
++                        kern_return_t hk2 = mach_vm_map( mach_task_self(), &hh, IOS_PA32_OILPAN_HI_REAL, 0xffff, VM_FLAGS_FIXED,
++                                                         MEMORY_OBJECT_NULL, 0, 0, PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY );
++                        if (hk2 == KERN_SUCCESS) ios_pa32_oilpan_hold_hi = 1;
++                        dprintf( 2, "[pa32] patch0110 2GB held at 0x%llx for Oilpan's large pages: kr=%d\n", (unsigned long long)IOS_PA32_OILPAN_HI_BASE, (int)hk2 );
++                    }
+                 }
+             }
+             dprintf( 2, "[fex-arena] ml793 PUBLISHED [%p,0x%llx) size=0x%llx version=1 -- the "

@@ -1,0 +1,18 @@
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -1903,10 +1903,13 @@
+     if (!pNotifyMapViewOfSection) return;
+     if (!NtCurrentTeb()->Tib.ArbitraryUserPointer)
+     {
++        /* Porthole 0049: this used to return here. FEX does not use the pointer (HandleImageMap reads the PE headers at the address),
++         * and a program that maps an image itself (Black Ops 3's protection maps clean copies of system DLLs and runs code from them)
++         * never sets it, so FEX never learned the range was executable: NOEXEC, c0000005 at the first call into the copy. The section
++         * query below still filters out anything that is not an image. */
+         static int skip_aup;
+         if (skip_aup < 20)
+-        { skip_aup++; ERR( "[map-notify] SKIP (no ArbitraryUserPointer) addr=%p size=%p\n", addr, (void *)size ); }
+-        return;
++        { skip_aup++; ERR( "[map-notify] 0049 no ArbitraryUserPointer, going on: addr=%p size=%p\n", addr, (void *)size ); }
+     }
+     if (NtQuerySection( handle, SectionImageInformation, &info, sizeof(info), NULL ))
+     {

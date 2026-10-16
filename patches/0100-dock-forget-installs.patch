@@ -1,0 +1,57 @@
+--- a/app/Runtime/DockInstallers.swift
++++ b/app/Runtime/DockInstallers.swift
+@@ -270,6 +270,24 @@
+         value = value.replacingOccurrences(of: "%INSTALLDIR%", with: installDir, options: .caseInsensitive)
+         if path { while value.contains("\\\\") { value = value.replacingOccurrences(of: "\\\\", with: "\\") } }
+         return value
++    }
++
++    /// Porthole 0100: the .reg text without the runs' values, so they count as not yet run; and how many values were removed.
++    static func unmark(_ runs: [SteamInstallRun], in text: String) -> (text: String, changed: Int) {
++        var lines = text.components(separatedBy: "\n")
++        var changed = 0
++        for run in runs {
++            let valueName = ("\"" + SteamInstallScripts.escape(run.name) + "\"=").lowercased()
++            for key in SteamInstallScripts.keys(run) {
++                let header = ("[" + SteamInstallScripts.escape(key) + "]").lowercased()
++                guard let start = lines.firstIndex(where: { $0.lowercased().hasPrefix(header) }) else { continue }
++                var index = start + 1
++                while index < lines.count, !lines[index].hasPrefix("[") {
++                    if lines[index].lowercased().hasPrefix(valueName) { lines.remove(at: index); changed += 1 } else { index += 1 }
++                }
++            }
++        }
++        return (lines.joined(separator: "\n"), changed)
+     }
+ 
+     /// The value a run has in a Wine .reg text (highest of both views), nil when absent.
+@@ -596,6 +614,29 @@
+         LogStore.shared.log("[dock-installers] app=\(appID) choice=\(run ? "run" : "skip")")
+     }
+ 
++    /// Porthole 0100: "Run them again". Forgets that this game's install-script programs ever ran (their values leave the prefix's registry files,
++    /// a .madeira-bak copy is kept once) and puts the One-time installs choice back on Run at next start, so the next start runs them all again.
++    /// Only while no session runs (the registry is on disk). Returns how many recorded values were removed.
++    @discardableResult
++    static func forget(_ game: DockGame, drive: URL, prefix: URL) -> Int {
++        let (found, _) = Self.found(game, drive: drive, defaultKey: flag("MADEIRA_INSTALL_DEFAULT_KEY"))
++        var total = 0
++        for (hive, file) in [(SteamInstallRun.Hive.machine, "system.reg"), (.user, "user.reg")] {
++            let runs = found.map(\.run).filter { $0.hive == hive }
++            let registry = prefix.appendingPathComponent(file)
++            guard !runs.isEmpty, let contents = try? Data(contentsOf: registry), !contents.isEmpty else { continue }
++            let (updated, changed) = DockInstallScripts.unmark(runs, in: String(decoding: contents, as: UTF8.self))
++            guard changed > 0 else { continue }
++            let backup = registry.appendingPathExtension("madeira-bak")
++            if !FileManager.default.fileExists(atPath: backup.path) { try? FileManager.default.copyItem(at: registry, to: backup) }
++            do { try Data(updated.utf8).write(to: registry, options: .atomic); total += changed }
++            catch { LogStore.shared.log("[dock-installers] app=\(game.id) could not forget the installs: \(error.localizedDescription)", level: .error) }
++        }
++        setRunsNext(game.id, true, prefix: prefix)
++        LogStore.shared.log("[dock-installers] app=\(game.id) forgot \(total) recorded value(s) of \(found.count) program(s)")
++        return total
++    }
++
+     // MARK: A start
+ 
+     /// Called right before a Dock start, while no session runs (the registry is on disk).

@@ -1,0 +1,7 @@
+# 0033 - the Dock puts Steam's location back (registry repair, `force`)
+
+**Problem.** After the Ubisoft Connect login, `upc.exe` ran `C:\ProgramData\Ubisoft\Ubisoft Game Launcher\cache\download\SteamSetup.exe` (it had downloaded Steam's installer) and the client did not go on; Far Cry 6 never got its handshake. The prefix said Steam was somewhere else: `HKLM\Software\Wow6432Node\Valve\Steam\InstallPath`, `HKCU\Software\Valve\Steam\SteamPath` and `SteamExe` all pointed at `C:\NIS B24066333~AG` (a game run outside Steam in the same prefix had overwritten them; `SourceModInstallPath` too). Ubisoft Connect is 32-bit and reads the 32-bit view, found no steam.exe there, and decided Steam was not installed. The Dock's Steam is always `C:\Program Files (x86)\Steam` (steam.exe exists there; `ActiveProcess\pid` and `SteamClientDll*` were already right).
+
+**Change.** `app/Runtime/DockRegistryRepair.swift`: a repair can name its registry file (`system.reg` / `user.reg`) and be `force`: it also replaces a value that holds something else. Two new repairs, run at every Dock start like the Ubisoft one (patch 0022): the 32-bit `InstallPath`, and the user's `SteamPath` / `SteamExe` (`C:/Program Files (x86)/Steam[/steam.exe]`, the form Steam itself writes). Log: `[dock-installers] registry repair: Steam location ...`. Host test: `app/Tests/Repair/run.sh`; also run on copies of the device's real registry files (it changed exactly those three values).
+
+**Note.** A program that writes these keys again (the NIS game) is corrected again at the next Dock start.

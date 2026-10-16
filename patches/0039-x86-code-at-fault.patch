@@ -1,0 +1,47 @@
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -1498,6 +1498,33 @@
+              why, written, total, path );
+ }
+ 
++/* Porthole 0039 (diagnostic): hex of guest code around an address, read with mach_vm_read_overwrite (cannot fault). Black Ops 3
++ * dies in its own protected code calling a null pointer; the bytes of the call site say which pointer. Rows of 32 bytes,
++ * "[x86_code] <tag> <address>: <hex>", so the log can be disassembled on the Mac. */
++static void ios_dump_x86_code( const char *tag, uint64_t addr, size_t before, size_t after )
++{
++    uint8_t buf[512];
++    mach_vm_size_t got = 0;
++    uint64_t start;
++    size_t len = before + after, i;
++
++    if (len > sizeof(buf)) len = sizeof(buf);
++    if (addr < before + 0x10000 || addr >= 0xfffffff000000000ULL) return;
++    start = addr - before;
++    if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)start, len, (mach_vm_address_t)buf, &got ) != KERN_SUCCESS || !got)
++    {
++        dprintf( STDERR_FILENO, "[x86_code] %s %llx UNREADABLE\n", tag, (unsigned long long)start );
++        return;
++    }
++    for (i = 0; i < got; i += 32)
++    {
++        char row[32 * 2 + 1];
++        size_t j, n = got - i < 32 ? got - i : 32;
++        for (j = 0; j < n; j++) snprintf( row + j * 2, 3, "%02x", buf[i + j] );
++        dprintf( STDERR_FILENO, "[x86_code] %s %llx: %s\n", tag, (unsigned long long)(start + i), row );
++    }
++}
++
+ static void *ios_mach_exception_thread( void *arg )
+ {
+     mach_port_t port = (mach_port_t)(uintptr_t)arg;
+@@ -5910,6 +5937,10 @@
+                                     (unsigned long long)cr[10], (unsigned long long)cr[11],
+                                     (unsigned long long)cr[12], (unsigned long long)cr[13],
+                                     (unsigned long long)cr[14], (unsigned long long)cr[15]);
++                                /* Porthole 0039: the code that made the call (return address of the newest callret entry), and the code
++                                 * at State.RIP. */
++                                ios_dump_x86_code( "call-site", cr[0], 0x1c0, 0x20 );
++                                if (state_rip != cr[0]) ios_dump_x86_code( "rip", state_rip, 0x40, 0x80 );
+                             }
+                         }
+                     }

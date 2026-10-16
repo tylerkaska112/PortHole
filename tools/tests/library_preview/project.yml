@@ -1,0 +1,9 @@
+name: F4Preview
+options: { bundleIdPrefix: com.example }
+targets:
+  F4Preview:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [Sources]
+    settings: { base: { GENERATE_INFOPLIST_FILE: YES, SWIFT_VERSION: 5.9, INFOPLIST_KEY_UILaunchScreen_Generation: YES, PRODUCT_BUNDLE_IDENTIFIER: com.example.f4preview } }

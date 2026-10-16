@@ -1,0 +1,208 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -11478,6 +11478,7 @@
+  *
+  * Deletes a view. virtual_mutex must be held by caller.
+  */
++static void ios_pool_trim_forget( uintptr_t base );   /* 0091 */
+ static void delete_view( struct file_view *view ) /* [in] View */
+ {
+     /* ml989: entered BEFORE any field of `view` is read, so "call never
+@@ -11486,6 +11487,7 @@
+     if ((view->protect & SEC_IMAGE) && ios_jit_image_retire_enabled())
+         ios_jit_retire_image( view->base, view->size );
+     if (view->protect & SEC_IMAGE) ios_jit_note_image_unmapped( view->base, view->size );
++    if (view->protect & SEC_IMAGE) ios_pool_trim_forget( (uintptr_t)view->base );
+     ios_swap_release_range( view->base, view->size, 0 );   /* ml1077 */
+     if (!(view->protect & VPROT_SYSTEM)) unmap_area( view->base, view->size );
+     if (ios_retire_trace_armed) ios_retire_mark( "D1u\n" );   /* unmap_area done */
+@@ -12575,6 +12577,118 @@
+ }
+ 
+ 
++/* Porthole 0091: how much of a very large image needs a copy in the JIT pool.
++ *
++ * The pool holds a copy of the WHOLE image (code, data, resources). An installer such as Rockstar's Social-Club-Setup.exe is 125 MB of which 180 KB is code: the rest is its payload in
++ * the resource section, which nothing reaches through the pool copy (resources are read through the ordinary mapping). Two copies of it were 250 MB of an 896-1120 MB pool.
++ * Only an image of at least 16 MB whose LAST section holds the resource directory and is at least 8 MB gets a shorter copy: everything up to that section. Addresses past the end of the
++ * copy are not translated (they stay the ordinary mapping, which is where they live). MADEIRA_POOL_TRIM=0 turns it off. Returns image_size when nothing is trimmed. */
++#define IOS_POOL_TRIM_MAX 64
++static struct { uintptr_t base, trimmed_end, full_end; } ios_pool_trimmed[IOS_POOL_TRIM_MAX];
++static int ios_pool_trimmed_count;
++
++static size_t ios_pool_trim_image( const char *image_base, size_t image_size )
++{
++    static int disabled = -1;
++    const unsigned char *b = (const unsigned char *)image_base;
++    unsigned int pe_off, nsec, optsize, rsrc_rva, hdr_size, i;
++    const unsigned char *opt, *sect;
++    unsigned int last_va = 0, last_size = 0, rsrc_sec_va = 0;
++    size_t trimmed;
++
++    if (disabled < 0) { const char *e = getenv( "MADEIRA_POOL_TRIM" ); disabled = e && e[0] == '0'; }
++    if (disabled || image_size < (16u << 20)) return image_size;
++    if (*(const unsigned short *)b != 0x5A4D) return image_size;
++    pe_off = *(const unsigned int *)(b + 0x3C);
++    if (pe_off > 0x800 || *(const unsigned int *)(b + pe_off) != 0x00004550) return image_size;
++    opt = b + pe_off + 0x18;
++    if (*(const unsigned short *)opt != 0x20B) return image_size;               /* PE32+ only */
++    nsec = *(const unsigned short *)(b + pe_off + 6);
++    optsize = *(const unsigned short *)(b + pe_off + 0x14);
++    hdr_size = *(const unsigned int *)(opt + 0x3C);
++    sect = opt + optsize;
++    if (!nsec || nsec > 96 || hdr_size > 0x4000 || sect + nsec * 40 > b + hdr_size) return image_size;
++    rsrc_rva = *(const unsigned int *)(opt + 0x70 + 2 * 8);
++    {
++        static int shown;
++        if (shown < 6)
++        {
++            shown++;
++            for (i = 0; i < nsec && i < 12; i++)
++            {
++                const unsigned char *sh = sect + i * 40;
++                dprintf( 2, "[jit-pool] 0091 big image %p+0x%lx section %.8s va=0x%x size=0x%x flags=0x%x%s\n", image_base, (unsigned long)image_size, sh,
++                         *(const unsigned int *)(sh + 12), *(const unsigned int *)(sh + 8), *(const unsigned int *)(sh + 36),
++                         (rsrc_rva >= *(const unsigned int *)(sh + 12) && rsrc_rva < *(const unsigned int *)(sh + 12) + *(const unsigned int *)(sh + 8)) ? " <- resources" : "" );
++            }
++        }
++    }
++    if (!rsrc_rva) return image_size;
++    {
++        unsigned int after = 0;
++        for (i = 0; i < nsec; i++)
++        {
++            const unsigned char *sh = sect + i * 40;
++            unsigned int va = *(const unsigned int *)(sh + 12), vsz = *(const unsigned int *)(sh + 8);
++            if (rsrc_rva >= va && rsrc_rva < va + (vsz ? vsz : 1)) { rsrc_sec_va = va; last_size = vsz; }
++        }
++        if (!rsrc_sec_va || last_size < (8u << 20)) return image_size;
++        /* what follows the resource section (a .reloc) must be small and not code */
++        for (i = 0; i < nsec; i++)
++        {
++            const unsigned char *sh = sect + i * 40;
++            unsigned int va = *(const unsigned int *)(sh + 12), vsz = *(const unsigned int *)(sh + 8), fl = *(const unsigned int *)(sh + 36);
++            if (va > rsrc_sec_va)
++            {
++                if (fl & 0x20000000) return image_size;   /* executable */
++                after += vsz;
++            }
++        }
++        if (after > (4u << 20)) return image_size;
++    }
++    trimmed = ((size_t)rsrc_sec_va + 0x3fff) & ~(size_t)0x3fff;
++    if (trimmed + (8u << 20) > image_size) return image_size;
++    return trimmed;
++}
++
++static void ios_pool_trim_note( const char *image_base, size_t trimmed, size_t full )
++{
++    int i;
++    for (i = 0; i < ios_pool_trimmed_count; i++)
++        if (ios_pool_trimmed[i].base == (uintptr_t)image_base)
++        {
++            ios_pool_trimmed[i].trimmed_end = (uintptr_t)image_base + trimmed;
++            ios_pool_trimmed[i].full_end = (uintptr_t)image_base + full;
++            return;
++        }
++    if (ios_pool_trimmed_count >= IOS_POOL_TRIM_MAX) return;
++    ios_pool_trimmed[ios_pool_trimmed_count].trimmed_end = (uintptr_t)image_base + trimmed;
++    ios_pool_trimmed[ios_pool_trimmed_count].full_end = (uintptr_t)image_base + full;
++    ios_pool_trimmed[ios_pool_trimmed_count].base = (uintptr_t)image_base;
++    ios_pool_trimmed_count++;
++}
++
++static void ios_pool_trim_forget( uintptr_t base )
++{
++    int i;
++    for (i = 0; i < ios_pool_trimmed_count; i++)
++        if (ios_pool_trimmed[i].base == base)
++        {
++            ios_pool_trimmed[i].trimmed_end = ios_pool_trimmed[i].full_end = 0;   /* matches nothing */
++            return;
++        }
++}
++
++/* Is [base,base+size) in the part of a trimmed image that has no pool copy? */
++static int ios_pool_in_trimmed_tail( const void *base, size_t size )
++{
++    uintptr_t a = (uintptr_t)base;
++    int i;
++    for (i = 0; i < ios_pool_trimmed_count; i++)
++        if (a >= ios_pool_trimmed[i].trimmed_end && a + size <= ios_pool_trimmed[i].full_end && a >= ios_pool_trimmed[i].base) return 1;
++    return 0;
++}
++
+ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+ {
+ #ifdef WINE_IOS
+@@ -12633,6 +12747,11 @@
+         unix_prot &= ~PROT_EXEC;
+         if (!unix_prot) unix_prot = PROT_READ;
+     }
++    else if ((unix_prot & PROT_EXEC) && ios_pool_in_trimmed_tail( base, size ))
++    {
++        unix_prot &= ~PROT_EXEC;   /* 0091: the resources of a trimmed image: data, no pool copy */
++        if (!unix_prot) unix_prot = PROT_READ;
++    }
+     else if ((unix_prot & PROT_EXEC) && ios_guest_anon_rwx_is_host_data( base, size ))
+     {
+         static unsigned long grd_n;
+@@ -13019,7 +13138,8 @@
+                                                    (mach_vm_address_t)&imgsz, &got) == KERN_SUCCESS &&
+                             got == 4 &&
+                             (imgsz == ios_jit_mappings[i].size ||
+-                             ((imgsz + 0x3fffu) & ~0x3fffu) == ios_jit_mappings[i].size);
++                             ((imgsz + 0x3fffu) & ~0x3fffu) == ios_jit_mappings[i].size ||
++                             ios_pool_trim_image( (const char *)mb, imgsz ) == ios_jit_mappings[i].size);
+                         if (!entry_ok)
+                         {
+                             dprintf(2, "[jit-pool] STALE containment rev=ml352: entry pe=%p+0x%lx "
+@@ -13586,6 +13706,17 @@
+              * page sharing). Also kills the 80MB-anchor dance: worst-case
+              * text→tramp distance is now ≤ image size, far under ±128MB. */
+             size_t page_size = 0x4000;
++            size_t image_full_size = image_size;   /* 0092: SizeOfImage; image_size becomes the length of the pool copy when it is cut */
++            {
++                size_t trimmed = ios_pool_trim_image( image_base, image_size );
++                if (trimmed < image_size)
++                {
++                    dprintf( 2, "[jit-pool] 0091 %p+0x%lx: pool copy cut to 0x%lx (the resource section from 0x%lx on stays the ordinary mapping)\n",
++                             image_base, (unsigned long)image_size, (unsigned long)trimmed, (unsigned long)trimmed );
++                    ios_pool_trim_note( image_base, trimmed, image_size );
++                    image_size = trimmed;
++                }
++            }
+             size_t image_alloc = (image_size + page_size - 1) & ~(page_size - 1);
+             size_t tramp_prealloc = ios_x18_tramp_prealloc_scan(image_base, image_size);
+             size_t data_delta = ios_jit_data_align_delta(image_base, image_size);
+@@ -13972,7 +14103,9 @@
+ 
+                     if (reloc_rva && reloc_sz && delta)
+                     {
+-                        char *reloc_data = rw_image + reloc_rva;
++                        /* 0092: when the pool copy was cut (0091) the relocation table lies past its end: read it from the mapping the copy was made from */
++                        char *reloc_data = (reloc_rva >= image_size && reloc_rva + reloc_sz <= image_full_size)
++                                           ? (char *)image_base + reloc_rva : rw_image + reloc_rva;
+                         char *block = reloc_data;
+                         int fixup_count = 0;
+ 
+@@ -13998,6 +14131,8 @@
+ 
+                                 if (type == 0) continue;
+ 
++                                if (type == 10 && (size_t)block_rva + off + 8 > image_size)
++                                    continue;   /* 0092: that word is in the cut-off tail; no pool copy of it */
+                                 if (type == 10)  /* IMAGE_REL_BASED_DIR64 */
+                                 {
+                                     uint64_t *fixup = (uint64_t *)(rw_image + block_rva + off);
+@@ -14034,6 +14169,10 @@
+                     }
+ 
+                     /* Store relocation info for later IAT sync re-application */
++                    /* 0092: later re-applications walk this table in the pool copy: with a cut copy it is not there, so none is recorded */
++                    if (reloc_rva >= image_size)
++                        ios_jit_set_reloc_info(image_base, pe_image_base, delta, 0, 0);
++                    else
+                     ios_jit_set_reloc_info(image_base, pe_image_base, delta,
+                                           reloc_rva, reloc_sz);
+ 

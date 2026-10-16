@@ -1,0 +1,102 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -5383,7 +5383,40 @@
+ 
+ static struct wine_rb_tree views_tree;
+ static pthread_mutex_t virtual_mutex;
++
++/* Porthole 0047: who holds virtual_mutex. A thread that faults while it holds the mutex (a copy into a view it is mapping) is stopped
++ * until the Mach exception thread has serviced the fault, and the exception thread's handler takes virtual_mutex too: both wait
++ * forever. Black Ops 3's protection maps a file as PAGE_EXECUTE_READ and hung that way for minutes. The owner (a TEB, or NULL) and
++ * the recursion depth are kept here; the handler does not lock when the faulting thread is the owner (it cannot change anything
++ * while it is stopped). The mutex is recursive, so a depth count tells when the owner lets go. */
++static TEB *volatile ios_vm_owner;
++static int ios_vm_depth;
++
++void ios_vm_note_lock( pthread_mutex_t *m )
++{
++    if (m != &virtual_mutex || process_exiting) return;
++    ios_vm_owner = NtCurrentTeb();
++    ios_vm_depth++;
++}
++
++void ios_vm_note_unlock( pthread_mutex_t *m )
++{
++    if (m != &virtual_mutex || process_exiting) return;
++    if (--ios_vm_depth <= 0) { ios_vm_depth = 0; ios_vm_owner = NULL; }
++}
++
++int ios_vm_owned_by( TEB *teb )
++{
++    return teb && ios_vm_owner == teb;
++}
+ 
++pthread_mutex_t *ios_virtual_mutex_ptr(void) { return &virtual_mutex; }
++
++static inline void ios_vm_lock( pthread_mutex_t *m ) { (mutex_lock)( m ); ios_vm_note_lock( m ); }
++static inline void ios_vm_unlock( pthread_mutex_t *m ) { ios_vm_note_unlock( m ); (mutex_unlock)( m ); }
++#define mutex_lock( m ) ios_vm_lock( m )
++#define mutex_unlock( m ) ios_vm_unlock( m )
++
+ static const UINT page_shift = 12;
+ static const UINT_PTR page_mask = 0xfff;
+ static const UINT_PTR granularity_mask = 0xffff;
+@@ -20215,8 +20248,19 @@
+     void *addr = (void *)rec->ExceptionInformation[1];
+     char *page = ROUND_ADDR( addr, host_page_mask );
+     BYTE vprot;
++    int proxy = ios_vm_owned_by( teb );   /* 0047: the faulting thread itself holds virtual_mutex */
+ 
+-    mutex_lock( &virtual_mutex );
++    if (!proxy) mutex_lock( &virtual_mutex );
++    else
++    {
++        static int proxy_logs;
++        if (proxy_logs < 12)
++        {
++            proxy_logs++;
++            dprintf( 2, "[mach-deliver] 0047 fault at %p (err %lu, pc %p) in a thread that holds virtual_mutex: serviced without locking (vprot %#x)\n",
++                     addr, (unsigned long)err, rec->ExceptionAddress, (unsigned)get_host_page_vprot( page ) );
++        }
++    }
+     vprot = get_host_page_vprot( page );
+ 
+     if (err == EXCEPTION_READ_FAULT && (get_unix_prot( vprot ) & PROT_READ))
+@@ -20261,7 +20305,7 @@
+                 ret = STATUS_SUCCESS;
+         }
+     }
+-    mutex_unlock( &virtual_mutex );
++    if (!proxy) mutex_unlock( &virtual_mutex );
+     rec->ExceptionCode = ret;
+     return ret;
+ }
+--- a/build/ntdll-unix/server_ios.c
++++ b/build/ntdll-unix/server_ios.c
+@@ -1891,12 +1891,18 @@
+ /***********************************************************************
+  *           server_enter_uninterrupted_section
+  */
++#ifdef WINE_IOS
++extern void ios_vm_note_lock( pthread_mutex_t *m );
++extern void ios_vm_note_unlock( pthread_mutex_t *m );
++#endif
++
+ void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )
+ {
+     pthread_sigmask( SIG_BLOCK, &server_block_set, sigset );
+     mutex_lock( mutex );
+ #ifdef WINE_IOS
+     ios_section_set_state( ios_section_state() + 1 );
++    ios_vm_note_lock( mutex );   /* Porthole 0047 */
+ #endif
+ }
+ 
+@@ -1910,6 +1916,7 @@
+     uintptr_t state = ios_section_state() - 1;
+ 
+     ios_section_set_state( state );
++    ios_vm_note_unlock( mutex );   /* Porthole 0047 */
+ #endif
+     mutex_unlock( mutex );
+     pthread_sigmask( SIG_SETMASK, sigset, NULL );

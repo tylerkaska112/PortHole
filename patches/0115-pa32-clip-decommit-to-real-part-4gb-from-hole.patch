@@ -1,0 +1,62 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-12 00:50:00
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-12 00:50:00
+@@ -11045,9 +11045,27 @@
+         else return view;
+     }
+     return NULL;
++}
++
++/* 0115: a hole-backed grant (0108/0111/0114) has a REAL part of 1-2 GB and a soft tail the guest believes is reserved. V8 then decommits or protects ranges that cover
++ * both (0.50.228 log: VirtualFree(0x7300000000, 4 GB, MEM_DECOMMIT) -> STATUS_UNABLE_TO_FREE_VM, after which V8 gave the whole reservation up). Clip such a range to the
++ * real view; the soft part has nothing to decommit. Returns 1 and shortens *size when it clipped. */
++static int ios_pa32_clip_to_real( const void *base, SIZE_T *size )
++{
++    struct file_view *v;
++    uint64_t vend, b = (uint64_t)(uintptr_t)base;
++
++    if (!ios_pa32_soft_enabled() || !*size) return 0;
++    if (!(v = find_view( base, 0 ))) return 0;
++    vend = (uint64_t)(uintptr_t)v->base + v->size;
++    if (b >= vend || b + *size <= vend) return 0;
++    if (ios_soft_find( vend ) < 0) return 0;
++    *size = (SIZE_T)(vend - b);
++    return 1;
+ }
+ 
+ 
++
+ /***********************************************************************
+  *           is_write_watch_range
+  */
+@@ -25278,11 +25296,11 @@
+             st = ios_pa32_sandbox_carve( ret, size_ptr, type, protect, attributes );   /* 0113 */
+         /* 0114: V8 goes on asking for 16 GB (ten random hints, each again without one) and then 8 GB, from the same code as the sandbox (nrip ...2734ac0/b3f), until
+          * it gets one. On Windows the first would succeed. They are served like 0108's random-hint reserves: a 4GB-aligned REAL start in the biggest hole, the rest soft. */
+-        if (st && is_jumbo && (jumbo_size == 0x400000000ULL || jumbo_size == 0x200000000ULL) && (type & MEM_RESERVE) && process == NtCurrentProcess()
++        if (st && is_jumbo && (jumbo_size == 0x400000000ULL || jumbo_size == 0x200000000ULL || jumbo_size == 0x100000000ULL) && (type & MEM_RESERVE) && process == NtCurrentProcess()
+             && ios_pa32_soft_enabled())
+         {
+             void *pb = NULL;
+-            if (ios_pa32_soft_back2( jumbo_size, type, protect, &pb, 0x100000000ULL, 0x40000000ULL ) == STATUS_SUCCESS)
++            if (ios_pa32_soft_back2( jumbo_size, type, protect, &pb, 0x100000000ULL, jumbo_size == 0x100000000ULL ? 0x80000000ULL : 0x40000000ULL ) == STATUS_SUCCESS)   /* 0115: 2 GB real for a 4 GB ask */
+             {
+                 *ret = pb; *size_ptr = jumbo_size; st = STATUS_SUCCESS;
+                 dprintf( 2, "[pa32] patch0114 %lu MB reserve served from a hole at %p (1 GB real, rest soft)\n", (unsigned long)(jumbo_size >> 20), pb );
+@@ -25710,7 +25728,8 @@
+     else if (!(view = find_view( base, 0 ))) status = STATUS_MEMORY_NOT_ALLOCATED;
+     else if (!is_view_valloc( view )) status = STATUS_INVALID_PARAMETER;
+     else if (!size && base != view->base) status = STATUS_FREE_VM_NOT_AT_BASE;
+-    else if ((char *)view->base + view->size - base < size && !(type & MEM_COALESCE_PLACEHOLDERS))
++    else if ((char *)view->base + view->size - base < size && !(type & MEM_COALESCE_PLACEHOLDERS)
++             && !(type == MEM_DECOMMIT && ios_pa32_clip_to_real( base, &size )))   /* 0115 */
+              status = STATUS_UNABLE_TO_FREE_VM;
+     else switch (type)
+     {
+@@ -25894,6 +25913,7 @@
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+ 
++    if (!find_view( base, size )) (void)ios_pa32_clip_to_real( base, &size );   /* 0115 */
+     if ((view = find_view( base, size )))
+     {
+         /* Make sure all the pages are committed */

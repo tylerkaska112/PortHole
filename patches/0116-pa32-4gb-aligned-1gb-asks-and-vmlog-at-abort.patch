@@ -1,0 +1,35 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-12 01:10:00
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-12 01:10:00
+@@ -23886,7 +23886,21 @@
+                  * SOFT-grant the cage deep inside the dead zone. Commits ride
+                  * the guard view (see [cage-commit] in the soft handler); the
+                  * collision to watch is BRP growing 8GB up from its bottom. */
+-                if (st2 && *size_ptr == 0x100000000ULL)
++                /* 0116: with the 0105 switch the soft cages below would sit inside the emulator's band. A 1 GB or 4 GB ask whose hint is 4GB-aligned (V8's external pointer
++                 * tables and cage ask for 4GB alignment; 0.50.229: three exact tries came back 64KB-aligned and were refused, the over-reserve of 5 GB-64KB found no gap and
++                 * Chrome raised its out-of-memory exception) gets a real 4GB-aligned range in the biggest hole instead (2 GB real for the 4 GB ask). */
++                if (st2 && ios_pa32_soft_enabled() && (*size_ptr == 0x40000000ULL || *size_ptr == 0x100000000ULL)
++                    && !((unsigned long long)(uintptr_t)hint & 0xffffffffULL))
++                {
++                    void *pb = NULL;
++                    if (ios_pa32_soft_back2( *size_ptr, type, protect, &pb, 0x100000000ULL,
++                                             *size_ptr == 0x100000000ULL ? 0x80000000ULL : *size_ptr ) == STATUS_SUCCESS)
++                    {
++                        pick = pb; sz = *size_ptr; st2 = 0;
++                        dprintf( 2, "[pa32] patch0116 %lu MB ask (hint %p) served 4GB-aligned at %p\n", (unsigned long)(*size_ptr >> 20), hint, pb );
++                    }
++                }
++                if (st2 && *size_ptr == 0x100000000ULL && !ios_pa32_soft_enabled())
+                 {
+                     static const uint64_t cage4_slots[] = { 0x7600000000ULL, 0x7500000000ULL };
+                     unsigned ci;
+--- a/build/ntdll-unix/thread_ios.c	2026-10-12 01:10:00
++++ b/build/ntdll-unix/thread_ios.c	2026-10-12 01:10:00
+@@ -1806,6 +1806,7 @@
+     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
+     ERR( "abort_process: status=0x%x — tearing down this pseudo-process only (ml937; was _exit, which killed the app)\n",
+          (unsigned int)status );
++    { extern void ios_vmlog_dump( const char * ); if (status) ios_vmlog_dump( "abort_process" ); }   /* 0116 */
+     process_exit_wrapper( get_unix_exit_code( status ));
+     /* noreturn */
+ #endif

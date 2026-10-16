@@ -1,0 +1,1 @@
+zstd-rle-tables.zst: made with `zstd -19` from deterministic data (runs of 3-5 equal bytes, value i mod 251, for i in 0..<32000, run lengths from Python's random with seed 7). It makes a block whose tables use the one-symbol (RLE) mode. Raw size 128022, SHA-1 0ab5ff303418c08bb83e74424e08ec7353bfe386.

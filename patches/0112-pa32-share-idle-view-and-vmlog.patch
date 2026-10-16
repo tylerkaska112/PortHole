@@ -1,0 +1,168 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-11 23:50:00
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-11 23:50:00
+@@ -1475,6 +1475,30 @@
+ #define IOS_PA32_OILPAN_HI_BASE 0x7400000000ULL
+ #define IOS_PA32_OILPAN_HI_REAL 0x80000000ULL
+ static int ios_pa32_oilpan_hold;
++/* 0112: a ring of the last virtual-memory calls on addresses at or above 0x7000000000 (and every failure), dumped when a guest int3 is reported, so the next
++ * log says which commit or release the guest saw fail before it crashed. */
++#define IOS_VMLOG_N 96
++static struct { uint64_t addr, size; unsigned tid, type, prot, st; char op; } ios_vmlog[IOS_VMLOG_N];
++static unsigned ios_vmlog_seq;
++static void ios_vmlog_add( char op, uint64_t addr, uint64_t size, ULONG type, ULONG prot, NTSTATUS st )
++{
++    unsigned i;
++    if (addr < 0x7000000000ULL && !st) return;
++    i = __atomic_fetch_add( &ios_vmlog_seq, 1, __ATOMIC_RELAXED ) % IOS_VMLOG_N;
++    ios_vmlog[i].op = op; ios_vmlog[i].addr = addr; ios_vmlog[i].size = size; ios_vmlog[i].type = type; ios_vmlog[i].prot = prot; ios_vmlog[i].st = st;
++    ios_vmlog[i].tid = NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0;
++}
++void ios_vmlog_dump( const char *why )
++{
++    unsigned n = ios_vmlog_seq, i, from = n > IOS_VMLOG_N ? n - IOS_VMLOG_N : 0;
++    dprintf( 2, "[vmlog] 0112 last %u virtual-memory calls (%s), oldest first\n", n - from, why );
++    for (i = from; i < n; i++)
++    {
++        unsigned k = i % IOS_VMLOG_N;
++        dprintf( 2, "[vmlog] %c tid=%04x addr=0x%llx size=0x%llx type=0x%x prot=0x%x st=0x%x\n", ios_vmlog[k].op, ios_vmlog[k].tid,
++                 (unsigned long long)ios_vmlog[k].addr, (unsigned long long)ios_vmlog[k].size, ios_vmlog[k].type, ios_vmlog[k].prot, ios_vmlog[k].st );
++    }
++}
+ static int ios_pa32_oilpan_hold_hi;
+ static NTSTATUS ios_pa32_cage_grant( HANDLE process, PVOID *ret, SIZE_T *size_ptr, SIZE_T req_size, ULONG type, ULONG protect )
+ {
+@@ -1679,6 +1703,22 @@
+     ios_bigres_tab[ios_bigres_cnt].base = (uint64_t)(uintptr_t)base;
+     ios_bigres_tab[ios_bigres_cnt].size = size;
+     ios_bigres_cnt++;
++}
++
++/* 0112: a real 32GB view at 0x7800000000 that nothing has committed in is handed to a second asker (see the soft-slot fallback). */
++static NTSTATUS ios_pa32_share_idle_pool( SIZE_T req, void **ret )
++{
++    unsigned i;
++
++    if (req > 0x800000000ULL || !find_view( (const void *)0x7800000000ULL, 0x1000 )) return STATUS_NO_MEMORY;
++    for (i = 0; i < ios_bigres_cnt; i++)
++    {
++        if (ios_bigres_tab[i].base != 0x7800000000ULL || ios_bigres_tab[i].size < 0x800000000ULL) continue;
++        if (ios_bigres_tab[i].committed >= 0x10000000ULL) return STATUS_NO_MEMORY;   /* 256 MB: somebody is using it */
++        *ret = (void *)0x7800000000ULL;
++        return STATUS_SUCCESS;
++    }
++    return STATUS_NO_MEMORY;
+ }
+ 
+ static void ios_bigres_commit( void *addr, size_t size )
+@@ -22995,7 +23035,7 @@
+     return hit;
+ }
+ 
+-NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
++static NTSTATUS WINAPI ios_vm_alloc_impl( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
+                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
+ {
+ #ifdef WINE_IOS
+@@ -23829,28 +23869,34 @@
+                      * page is a deliberate forbidden zone PA never commits, so it
+                      * costs nothing that it may be unmappable. */
+                     uint64_t slot;
++                    int pa32_decline = 0;
+                     /* 0108: a random-hint 16GB ask (not the guard layout) is served from the map's biggest hole, with its first part real */
+                     if (ios_pa32_soft_enabled() && *size_ptr < 0x800000000ULL && off && off < align_unit - 0x100000)
+                     {
+                         void *pb = NULL;
+                         if (ios_pa32_soft_back( *size_ptr, type, protect, &pb ) == STATUS_SUCCESS) { *ret = pb; st = STATUS_SUCCESS; }
+                     }
+-                    /* 0111: the THIRD 32GB ask (RDR2's in-process renderer thread, 0.50.224 log) found every slot taken and was answered with a soft slot at
+-                     * 0x7400000000: exactly on the BRP half of PartitionAlloc's own pool and on Oilpan's large-page half. Two allocators then committed the same
+-                     * pages, PA's free path saw trashed BackupRefPtr metadata and int3'd (and a reader met 0xEF quarantine bytes). With the switch on, such an ask is
+-                     * served like 0108's: a real 2GB view on a 4GB-aligned address in the biggest hole, the rest soft, so nothing it touches first is shared. */
+-                    if (st && ios_pa32_soft_enabled() && *size_ptr == 0x800000000ULL && !off)
++                    /* 0112 (replaces 0111's hole attempt): RDR2's V8 sandbox (the renderer thread's 32 GB ask, 16GB-aligned; it halves to 16 GB when refused) was
++                     * answered with a soft slot at 0x7400000000 in 0.50.224 and with a 4GB-aligned hole in 0.50.225 (rejected three times, then its 16 GB retry got
++                     * 0x7400000000 again). 0x7400000000 is the BRP half of PartitionAlloc's own glued 32 GB pool [0x7000000000,0x7800000000): the sandbox's
++                     * pages and PA's pages were the same memory (BackupRefPtr assertion, 0xEF quarantine reads, int3). The other real 32 GB view, [0x7800000000,...),
++                     * is reserved by an owner that never commits (0 MB in 41 calls over the whole run), so the ask shares it. If that view is gone or no longer idle the
++                     * ask is DECLINED rather than answered with a range that overlaps a live pool: V8 then tries a smaller size. */
++                    if (st && ios_pa32_soft_enabled() && !off && (*size_ptr == 0x800000000ULL || *size_ptr == 0x400000000ULL))
+                     {
+                         void *pb = NULL;
+-                        if (ios_pa32_soft_back2( *size_ptr, type, protect, &pb, 0x100000000ULL, 0x80000000ULL ) == STATUS_SUCCESS
+-                            || ios_pa32_soft_back2( *size_ptr, type, protect, &pb, 0, 0x80000000ULL ) == STATUS_SUCCESS)
++                        pa32_decline = 1;
++                        if (ios_pa32_share_idle_pool( *size_ptr, &pb ) == STATUS_SUCCESS)
+                         {
+-                            *ret = pb; st = STATUS_SUCCESS; ios_pa32_soft_seen_third = 1;
+-                            dprintf( 2, "[pa32] patch0111 32GB ask #%u served from a hole at %p instead of a slot that overlaps the pools\n",
+-                                     ios_jumbo_seq + 1, pb );
++                            *ret = pb; st = STATUS_SUCCESS; pa32_decline = 0; ios_pa32_soft_seen_third = 1;
++                            dprintf( 2, "[pa32] patch0112 %lu MB ask #%u shares the idle real 32GB view at %p (nothing there has ever been committed)\n",
++                                     (unsigned long)(*size_ptr >> 20), ios_jumbo_seq + 1, pb );
+                         }
++                        else
++                            dprintf( 2, "[pa32] patch0112 %lu MB ask #%u declined: no idle real 32GB view to share, and every slot overlaps a live pool\n",
++                                     (unsigned long)(*size_ptr >> 20), ios_jumbo_seq + 1 );
+                     }
+-                    for (slot = 0x7000000000ULL; slot < 0x8000000000ULL && st; slot += align_unit)
++                    for (slot = 0x7000000000ULL; slot < 0x8000000000ULL && st && !pa32_decline; slot += align_unit)
+                     {
+                         void *probe_addr = (void *)(uintptr_t)slot;
+                         SIZE_T probe_sz = 0x10000;
+@@ -25384,7 +25430,7 @@
+ }
+ #endif
+ 
+-NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG type )
++static NTSTATUS WINAPI ios_vm_free_impl( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG type )
+ {
+     struct file_view *view;
+     char *base;
+@@ -25657,7 +25703,7 @@
+  *             NtProtectVirtualMemory   (NTDLL.@)
+  *             ZwProtectVirtualMemory   (NTDLL.@)
+  */
+-NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr,
++static NTSTATUS WINAPI ios_vm_protect_impl( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr,
+                                         ULONG new_prot, ULONG *old_prot )
+ {
+     struct file_view *view;
+@@ -28236,3 +28282,28 @@
+ }
+ 
+ #endif  /* _WIN64 */
++
++/* 0112: the exported entry points record the call's outcome in ios_vmlog. */
++NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits, SIZE_T *size_ptr, ULONG type, ULONG protect )
++{
++    uint64_t req_addr = ret ? (uint64_t)(uintptr_t)*ret : 0, req_size = size_ptr ? *size_ptr : 0;
++    NTSTATUS st = ios_vm_alloc_impl( process, ret, zero_bits, size_ptr, type, protect );
++    ios_vmlog_add( 'A', st ? req_addr : (ret ? (uint64_t)(uintptr_t)*ret : req_addr), st ? req_size : (size_ptr ? *size_ptr : req_size), type, protect, st );
++    return st;
++}
++
++NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG type )
++{
++    uint64_t a = addr_ptr ? (uint64_t)(uintptr_t)*addr_ptr : 0, sz = size_ptr ? *size_ptr : 0;
++    NTSTATUS st = ios_vm_free_impl( process, addr_ptr, size_ptr, type );
++    ios_vmlog_add( 'F', a, sz, type, 0, st );
++    return st;
++}
++
++NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG new_prot, ULONG *old_prot )
++{
++    uint64_t a = addr_ptr ? (uint64_t)(uintptr_t)*addr_ptr : 0, sz = size_ptr ? *size_ptr : 0;
++    NTSTATUS st = ios_vm_protect_impl( process, addr_ptr, size_ptr, new_prot, old_prot );
++    ios_vmlog_add( 'P', a, sz, 0, new_prot, st );
++    return st;
++}
+--- a/build/ntdll-unix/signal_arm64_ios.c	2026-10-11 23:50:00
++++ b/build/ntdll-unix/signal_arm64_ios.c	2026-10-11 23:50:00
+@@ -1967,6 +1967,7 @@
+                             uint64_t stk[24];
+                             mach_vm_size_t sg = 0;
+                             int3_dumped++;
++                            { extern void ios_vmlog_dump( const char * ); ios_vmlog_dump( "int3-guest" ); }   /* 0112 */
+                             ios_dump_x86_code( "int3-code", grip - 1, 0xa0, 0x80 );
+                             /* Porthole 0062: is the int3's page an anonymous JIT alias (the game allocated RWX memory, the engine dual-maps it)? Then the
+                              * three views must agree: the guest VA FEX decodes from, the pool RX alias and the pool RW alias that emulated stores write.

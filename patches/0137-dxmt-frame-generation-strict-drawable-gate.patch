@@ -1,0 +1,36 @@
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -3545,7 +3545,9 @@
+     else {
+       int maxd = (int)((CAMetalLayer *)drawable.layer).maximumDrawableCount;
+       if (maxd < 2) maxd = 2;
+-      if (__atomic_load_n(&g_fg.inflight, __ATOMIC_RELAXED) + 2 > maxd) { g_fg.skip_flight++; gen_ok = 0; }
++      /* 0137: the frame on the screen holds a drawable too (until the next one replaces it), besides the game's own and the extra one; every frame that
++       * goes out counts, those that were not generated as well (see the tracking below). With the pool at three this means "nothing waiting to be shown". */
++      if (__atomic_load_n(&g_fg.inflight, __ATOMIC_RELAXED) + 3 > maxd) { g_fg.skip_flight++; gen_ok = 0; }
+     }
+   }
+   {
+@@ -3584,12 +3586,14 @@
+     [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+     g_fg.cur = ni;
+     g_fg.have_prev = 1;
++    madeira_fg_track(drawable);
+     return 0;
+   }
+   if (!gen_ok) {      /* this frame goes out as it is; the history still moves on */
+     g_fg.cur = ni;
+     g_fg.frames++;
+     madeira_fg_stats(now, tb.numer, tb.denom);
++    madeira_fg_track(drawable);
+     return 0;
+   }
+ 
+@@ -3626,6 +3630,7 @@
+   if (!extra || extra.texture.width != g_fg.w || extra.texture.height != g_fg.h) {
+     g_fg.no_drawable++;
+     madeira_fg_stats(now, tb.numer, tb.denom);
++    madeira_fg_track(drawable);
+     return 0;   /* the caller presents the real frame as usual */
+   }
+   {

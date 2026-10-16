@@ -1,0 +1,1046 @@
+diff --git a/app/Madeira/DockInstallers.swift b/app/Madeira/DockInstallers.swift
+index 2db3395..b009764 100644
+--- a/app/Madeira/DockInstallers.swift
++++ b/app/Madeira/DockInstallers.swift
+@@ -22,7 +22,7 @@ struct SteamInstallRun: Equatable, Hashable, Sendable, Codable {
+ /// One program of a "Run Process" entry, resolved to a Windows path.
+ struct SteamInstallProcess: Equatable, Sendable {
+     var run: SteamInstallRun
+-    var executable: String      // C:\...
++    var executable: String      // C:\... or E:\...
+     var arguments: String
+ }
+ 
+@@ -249,7 +249,7 @@ enum DockInstallScripts {
+                 guard let raw = fields["process \(number)"], !raw.isEmpty, raw.utf8.count <= 1024 else { continue }
+                 let exe = expand(raw, installDir: installDir)
+                 let lower = exe.lowercased()
+-                guard exe.count > 3, exe.hasPrefix("C:\\"), !exe.contains("%"), !exe.contains("\""),
++                guard exe.count > 3, (exe.hasPrefix("C:\\") || exe.hasPrefix("E:\\")), !exe.contains("%"), !exe.contains("\""),
+                       !exe.contains(".."), lower.hasSuffix(".exe") || lower.hasSuffix(".msi") else { continue }
+                 let args = expand(fields["command \(number)"] ?? "", installDir: installDir, path: false)
+                     .trimmingCharacters(in: .whitespaces)
+@@ -493,11 +493,13 @@ enum DockInstallers {
+ 
+     /// The install scripts' programs of a game: its own folder (one level down) and the
+     /// shared redistributables Steam keeps next to it, and how many scripts were read.
+-    nonisolated static func found(_ game: DockGame, drive: URL,
++    nonisolated static func found(_ game: DockGame, drive: URL, externalRoot: URL? = nil,
+                                   defaultKey: Bool = DockInstallers.flag("MADEIRA_INSTALL_DEFAULT_KEY")) -> (processes: [SteamInstallProcess], scripts: Int) {
++        guard game.storageID == "internal" || externalRoot != nil else { return ([], 0) }
++        let drive = game.storageID == "internal" ? drive : externalRoot!
+         let common = game.library + "/common"
+         let shared = common + "/Steamworks Shared"
+-        func windows(_ relative: String) -> String { "C:\\" + relative.replacingOccurrences(of: "/", with: "\\") }
++        func windows(_ relative: String) -> String { (game.storageID == "internal" ? "C:\\" : "E:\\") + relative.replacingOccurrences(of: "/", with: "\\") }
+         let roots: [(URL, Int, String, Int?)] = [
+             (drive.appendingPathComponent(common + "/" + game.installDir, isDirectory: true), 1, game.windowsInstallPath,
+              defaultKey ? game.id : nil),
+@@ -520,29 +522,27 @@ enum DockInstallers {
+     }
+ 
+     /// The number of install-script programs a game has (the Dock sheet's list).
+-    nonisolated static func programCount(_ game: DockGame, drive: URL) -> Int {
+-        enabled ? found(game, drive: drive).processes.count : 0
++    nonisolated static func programCount(_ game: DockGame, drive: URL, externalRoot: URL? = nil) -> Int {
++        enabled ? found(game, drive: drive, externalRoot: externalRoot).processes.count : 0
+     }
+ 
+     nonisolated static func inside(_ url: URL, drive: URL) -> Bool {
+         url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(drive.resolvingSymlinksInPath().standardizedFileURL.path + "/")
+     }
+ 
+-    /// A C:\ path resolved on disk the way Wine resolves it (case-insensitive), staying
+-    /// inside drive_c; nil when it does not exist.
+-    nonisolated static func resolve(_ windowsPath: String, drive: URL) -> URL? {
+-        guard windowsPath.uppercased().hasPrefix("C:\\"), windowsPath.utf8.count < 1024 else { return nil }
++    /// A C:\ or E:\ path resolved case-insensitively within its selected root;
++    /// nil when the root or file is unavailable.
++    nonisolated static func resolve(_ windowsPath: String, drive: URL, externalRoot: URL? = nil) -> URL? {
++        let external = windowsPath.uppercased().hasPrefix("E:\\")
++        guard (windowsPath.uppercased().hasPrefix("C:\\") || (external && externalRoot != nil)), windowsPath.utf8.count < 1024 else { return nil }
++        let drive = external ? externalRoot! : drive
+         let parts = windowsPath.dropFirst(3).split(separator: "\\", omittingEmptySubsequences: false).map(String.init)
+         guard !parts.isEmpty, !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.contains("/") }) else { return nil }
+         var current = drive
+         for part in parts {
+-            let exact = current.appendingPathComponent(part)
+-            if FileManager.default.fileExists(atPath: exact.path) { current = exact }
+-            else {
+-                guard let names = try? FileManager.default.contentsOfDirectory(atPath: current.path),
+-                      let match = names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame }) else { return nil }
+-                current.appendPathComponent(match)
+-            }
++            guard let names = try? FileManager.default.contentsOfDirectory(atPath: current.path),
++                  let match = names.first(where: { $0 == part }) ?? names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame }) else { return nil }
++            current.appendPathComponent(match)
+             guard inside(current, drive: drive) else { return nil }
+         }
+         return current
+@@ -562,9 +562,9 @@ enum DockInstallers {
+     /// Why this build cannot run a program, nil when it can. Decided by what the program is
+     /// (a Windows Installer package, a 32-bit executable) and what the bundle has, never by
+     /// its name: a package needs msiexec.exe, a 32-bit executable needs 32-bit support.
+-    nonisolated static func runnable(_ process: SteamInstallProcess, drive: URL, has32Bit: Bool, hasMsiexec: Bool) -> String? {
++    nonisolated static func runnable(_ process: SteamInstallProcess, drive: URL, has32Bit: Bool, hasMsiexec: Bool, externalRoot: URL? = nil) -> String? {
+         if process.executable.lowercased().hasSuffix(".msi") { return hasMsiexec ? nil : "Windows Installer package" }
+-        guard let file = resolve(process.executable, drive: drive), let machine = machine(file) else { return nil }
++        guard let file = resolve(process.executable, drive: drive, externalRoot: externalRoot), let machine = machine(file) else { return nil }
+         return machine == 0x14c && !has32Bit ? "32-bit installer" : nil
+     }
+ 
+@@ -593,7 +593,7 @@ enum DockInstallers {
+ 
+     /// Called right before a Dock start, while no session runs (the registry is on disk).
+     /// Records the previous batch's results, plans the game's programs and writes the batch.
+-    static func prepare(_ game: DockGame, drive: URL, prefix: URL,
++    static func prepare(_ game: DockGame, drive: URL, prefix: URL, externalRoot: URL? = nil,
+                         has32Bit: Bool = DockInstallers.bundleHas32Bit, hasMsiexec: Bool = DockInstallers.bundleHasMsiexec,
+                         fusionSource: URL? = Bundle.main.resourceURL?.appendingPathComponent("i386-windows/fusion.dll")) {
+         script = nil; serverSync = false; note = nil; finishedAt = nil; logged = []
+@@ -606,7 +606,7 @@ enum DockInstallers {
+             LogStore.shared.log("[dock-installers] app=\(app) off (MADEIRA_DOCK_INSTALLERS=0)"); return
+         }
+         let defaultKey = flag("MADEIRA_INSTALL_DEFAULT_KEY")
+-        let (found, scripts) = Self.found(game, drive: drive, defaultKey: defaultKey)
++        let (found, scripts) = Self.found(game, drive: drive, externalRoot: externalRoot, defaultKey: defaultKey)
+         guard !found.isEmpty else {
+             LogStore.shared.log("[dock-installers] app=\(app) scripts=\(scripts) programs=0"); return
+         }
+@@ -615,8 +615,8 @@ enum DockInstallers {
+         }
+         let items = DockInstallScripts.plan(found,
+                                             done: { DockInstallScripts.marked($0, in: registry[$0.hive] ?? "") },
+-                                            exists: { resolve($0, drive: drive) != nil },
+-                                            runnable: { runnable($0, drive: drive, has32Bit: has32Bit, hasMsiexec: hasMsiexec) })
++                                            exists: { resolve($0, drive: drive, externalRoot: externalRoot) != nil },
++                                            runnable: { runnable($0, drive: drive, has32Bit: has32Bit, hasMsiexec: hasMsiexec, externalRoot: externalRoot) })
+         var pending = items.filter { $0.status == .pending }.map(\.process)
+         var ledger = DockInstallLedger.load(prefix: prefix)
+         // The game's One-time installs choice: absent or "Run at next start" runs the pending
+diff --git a/app/Madeira/MadeiraDock.swift b/app/Madeira/MadeiraDock.swift
+index c5c2dba..dffb25b 100644
+--- a/app/Madeira/MadeiraDock.swift
++++ b/app/Madeira/MadeiraDock.swift
+@@ -34,10 +34,19 @@ struct DockGame: Identifiable, Equatable, Sendable {
+     let library: String         // drive-relative steamapps folder
+     let installed: Bool         // StateFlags has "fully installed"
+     let customExecutables: Bool // the install record lists per-user executables (CheckGuid)
++    var storageID: String = "internal"
++    var storageAvailable = true
+ 
+-    /// Windows path of the game's folder, which Dock requires Valve's client to resolve to.
++    /// Canonical Wine path of the game folder, used for direct starts and installers.
+     var windowsInstallPath: String {
+-        "C:\\" + (library + "/common/" + installDir).replacingOccurrences(of: "/", with: "\\")
++        (storageID == "internal" ? "C:\\" : "E:\\") + (library + "/common/" + installDir).replacingOccurrences(of: "/", with: "\\")
++    }
++
++    var clientInstallPath: String {
++        if storageID != "internal" {
++            return SteamStoragePath.externalWindowsRoot + "\\" + windowsInstallPath.dropFirst(3)
++        }
++        return windowsInstallPath
+     }
+ }
+ 
+@@ -82,14 +91,14 @@ enum MadeiraDock {
+     }
+ 
+     /// The game an app manifest describes, or nil when it is not one Dock can start.
+-    static func game(manifest data: Data, library: String) -> DockGame? {
++    static func game(manifest data: Data, library: String, storageID: String = "internal") -> DockGame? {
+         guard data.count <= 1 << 20, var parser = try? SteamKeyValues(data), let root = try? parser.read(),
+               let state = root["AppState"], let appID = state["appid"]?.string.flatMap({ Int($0) }), validAppID(appID),
+               let folder = state["installdir"]?.string, validFolderName(folder) else { return nil }
+         let flags = state["StateFlags"]?.string.flatMap { UInt32($0) } ?? 0
+         let name = state["name"]?.string.map { String($0.prefix(200)) } ?? ""
+         return DockGame(id: appID, name: name.isEmpty ? "App \(appID)" : name, installDir: folder, library: library,
+-                        installed: flags & 4 != 0, customExecutables: !(state["CheckGuid"]?.fields.isEmpty ?? true))
++                        installed: flags & 4 != 0, customExecutables: !(state["CheckGuid"]?.fields.isEmpty ?? true), storageID: storageID)
+     }
+ 
+     /// Installed games in the client's own library (`<client>/steamapps`) and the other
+@@ -121,6 +130,28 @@ enum MadeiraDock {
+         return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+     }
+ 
++    /// The sole registered external library. Missing storage is an error, not
++    /// an empty discovery result; callers retain their remembered identities.
++    static func games(library: SteamStorageLibrary, root: URL) throws -> [DockGame] {
++        guard library.id != SteamStorageLibrary.internalID else { return games(drive: root) }
++        try SteamStorageIdentity.verify(library.id, root: root)
++        let apps = try SteamStoragePath.native("steamapps", root: root)
++        let names: [String]
++        do { names = try FileManager.default.contentsOfDirectory(atPath: apps.path) }
++        catch let error as NSError where error.domain == NSCocoaErrorDomain && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code) { return [] }
++        var result: [DockGame] = []
++        for name in names.sorted().prefix(2000) where name.hasPrefix("appmanifest_") && name.hasSuffix(".acf") {
++            let record = try SteamStoragePath.native("steamapps/" + name, root: root)
++            let values = try record.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
++            guard values.isRegularFile == true, (values.fileSize ?? Int.max) <= 1 << 20,
++                  let game = game(manifest: try Data(contentsOf: record), library: "steamapps", storageID: library.id),
++                  !result.contains(where: { $0.id == game.id }) else { continue }
++            _ = try SteamStoragePath.native("steamapps/common/" + game.installDir, root: root)
++            result.append(game)
++        }
++        return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
++    }
++
+     /// "C:\\Games\\SteamLibrary" -> "Games/SteamLibrary/steamapps" (C: only).
+     static func libraryRelative(_ windowsPath: String) -> String? {
+         let path = windowsPath.replacingOccurrences(of: "\\", with: "/")
+@@ -131,7 +162,7 @@ enum MadeiraDock {
+     }
+ 
+     /// Everything a launch needs, checked before any sign-in is handed over.
+-    static func validate(_ game: DockGame, drive: URL, bundled: Bool = MadeiraDock.bundled) throws {
++    static func validate(_ game: DockGame, drive: URL, bundled: Bool = MadeiraDock.bundled, libraryRoot: URL? = nil) throws {
+         guard bundled else { throw DockError.message("Madeira Dock is not built into this app. Run build/madeira-dock/build.sh.") }
+         guard validAppID(game.id), validFolderName(game.installDir) else {
+             throw DockError.message("This game's Steam install record is invalid.")
+@@ -139,9 +170,11 @@ enum MadeiraDock {
+         guard FileManager.default.fileExists(atPath: drive.appendingPathComponent(SteamRuntimeFiles.relativeRoot + "/steamclient64.dll").path) else {
+             throw DockError.message("Steam's client files are missing. Download Valve's client components first.")
+         }
++        guard game.storageID == "internal" || libraryRoot != nil else { throw SteamStorageError.unavailable(.disconnected) }
++        let folder = try SteamStoragePath.native(game.library + "/common/" + game.installDir, root: libraryRoot ?? drive)
+         var isFolder: ObjCBool = false
+         guard game.installed,
+-              FileManager.default.fileExists(atPath: drive.appendingPathComponent(game.library + "/common/" + game.installDir).path, isDirectory: &isFolder),
++              FileManager.default.fileExists(atPath: folder.path, isDirectory: &isFolder),
+               isFolder.boolValue else {
+             throw DockError.message("Steam does not list this game as fully installed.")
+         }
+@@ -256,6 +289,9 @@ enum MadeiraDock {
+                let reason = Self.launchRefusal(error, waited: result == 48) {
+                 return reason
+             }
++            if result == 41 {
++                return "Steam did not resolve this game's registered install folder. Reconnect its storage and retry; if this repeats, export the log."
++            }
+             return "Madeira Dock could not complete the Steam launch (code \(result)). Export the log before trying again."
+         }
+ 
+@@ -415,7 +451,7 @@ enum MadeiraDock {
+         setenv("MADEIRA_STEAM_HOST_APPID", String(game.id), 1)
+         setenv("MADEIRA_STEAM_HOST_LAUNCH_OPTION", String(launchOption), 1)
+         setenv("MADEIRA_STEAM_HOST_CLIENT_DIR", SteamRuntimeFiles.windowsRoot, 1)
+-        setenv("MADEIRA_STEAM_HOST_EXPECTED_INSTALL", game.windowsInstallPath, 1)
++        setenv("MADEIRA_STEAM_HOST_EXPECTED_INSTALL", game.clientInstallPath, 1)
+         setenv("MADEIRA_STEAM_HOST_LOG", "C:\\madeira-dock.txt", 1)
+         // The install record lists per-user executables: Dock asks Valve's client to prepare
+         // them before it launches. env.MADEIRA_DOCK_CEG = 0 never asks.
+diff --git a/app/Madeira/SteamInstall.swift b/app/Madeira/SteamInstall.swift
+index 12db835..a508756 100644
+--- a/app/Madeira/SteamInstall.swift
++++ b/app/Madeira/SteamInstall.swift
+@@ -24,8 +24,68 @@ enum SteamInstallPaths {
+ 
+     /// Whether an install (its drive-relative library folder) is in the library
+     /// Madeira downloads into, and so can be updated or removed here.
+-    static func isManaged(library: String) -> Bool {
+-        library.caseInsensitiveCompare(libraryRelative) == .orderedSame
++    static func isManaged(library: String, storageID: String = "internal") -> Bool {
++        library.caseInsensitiveCompare(storageID == "internal" ? libraryRelative : "steamapps") == .orderedSame
++    }
++}
++
++/// Register the one external root with Valve's client while no Wine session is
++/// running. Preserve existing libraries and unknown fields; refuse malformed
++/// metadata instead of replacing it with an empty document.
++enum SteamLibraryFolders {
++    /// verifiedAliasOwnerID comes from Madeira's private prefix record, after the
++    /// caller validates the SSD marker and both filesystem mappings. Steam can
++    /// rewrite libraryfolders.vdf without preserving our custom ownership field.
++    static func register(externalID: String, name: String, apps: [Int: Int64], drive: URL,
++                         verifiedAliasOwnerID: String? = nil) throws {
++        guard UUID(uuidString: externalID) != nil else { throw SteamStorageError.invalidRecord }
++        let file = try SteamStoragePath.native(SteamInstallPaths.libraryRelative + "/libraryfolders.vdf", root: drive)
++        var root: [String: SteamValue] = [:]
++        do {
++            let data = try Data(contentsOf: file)
++            var parser = try SteamKeyValues(data)
++            root = try parser.read().fields
++            guard root["libraryfolders"] != nil else { throw SteamStorageError.invalidRecord }
++        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { }
++        var folders = root["libraryfolders"]?.fields ?? [:]
++        if folders.isEmpty {
++            folders["0"] = .object(["path": .text("C:\\Program Files (x86)\\Steam"), "apps": .object([:])])
++        }
++        let owned = folders.first { $0.value["madeira_library_id"]?.string == externalID }?.key
++        let existingAlias = folders.first {
++            let path = $0.value["path"]?.string?.trimmingCharacters(in: CharacterSet(charactersIn: "\\/")).lowercased()
++            return path == SteamStoragePath.externalWindowsRoot.lowercased()
++        }?.key
++        // Recover a Steam-rewritten entry only with independent, verified
++        // ownership. An explicit different ID or an unrelated E: stays untouched.
++        if let existingAlias, owned != existingAlias {
++            guard owned == nil,
++                  folders[existingAlias]?["madeira_library_id"] == nil,
++                  verifiedAliasOwnerID == externalID else {
++                throw SteamStorageError.mappingConflict
++            }
++        }
++        let key = owned ?? existingAlias ?? String((folders.keys.compactMap(Int.init).max() ?? 0) + 1)
++        var entry = folders[key]?.fields ?? [:]
++        entry["path"] = .text(SteamStoragePath.externalWindowsRoot)
++        entry["label"] = .text(name)
++        entry["madeira_library_id"] = .text(externalID)
++        entry["apps"] = .object(Dictionary(uniqueKeysWithValues: apps.map { (String($0.key), .text(String(max(0, $0.value)))) }))
++        folders[key] = .object(entry)
++        root["libraryfolders"] = .object(folders)
++        func quote(_ text: String) -> String {
++            "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
++        }
++        func encode(_ fields: [String: SteamValue], indent: String = "") -> String {
++            fields.keys.sorted().map { key in
++                switch fields[key]! {
++                case .text(let value): return indent + quote(key) + "\t" + quote(value) + "\n"
++                case .object(let nested): return indent + quote(key) + "\n" + indent + "{\n" + encode(nested, indent: indent + "\t") + indent + "}\n"
++                }
++            }.joined()
++        }
++        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
++        try Data(encode(root).utf8).write(to: file, options: .atomic)
+     }
+ }
+ 
+@@ -48,26 +108,52 @@ enum SteamInstallFiles {
+     /// resume journal and the records of the apps that own its shared depots
+     /// (those describe the same folder). Only paths strictly inside
+     /// `steamApps/common` are removed.
+-    nonisolated static func delete(appID: Int, folderName: String, steamApps: URL) {
++    nonisolated static func delete(appID: Int, folderName: String, steamApps: URL) throws {
++        guard appID > 0, folderName == safeFolderName(folderName) else {
++            throw CocoaError(.fileWriteInvalidFileName)
++        }
+         let fm = FileManager.default
+-        let common = steamApps.appendingPathComponent("common", isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+-        let folder = common.appendingPathComponent(safeFolderName(folderName)).resolvingSymlinksInPath().standardizedFileURL
+-        if folder.path.hasPrefix(common.path + "/"), folder.deletingLastPathComponent().path == common.path {
+-            try? fm.removeItem(at: folder)
++        let root = steamApps.resolvingSymlinksInPath().standardizedFileURL
++        var isDirectory: ObjCBool = false
++        guard fm.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
++            throw CocoaError(.fileNoSuchFile)
+         }
+-        let recordURL = steamApps.appendingPathComponent("appmanifest_\(appID).acf")
+-        if let state = record(appID: appID, steamApps: steamApps) {
++        // Validate every target before changing anything. Never follow common,
++        // downloading, a game folder or an install record outside this library.
++        func target(_ relative: String) throws -> URL {
++            var url = root
++            for component in relative.split(separator: "/") {
++                url.appendPathComponent(String(component))
++                do {
++                    let attributes = try fm.attributesOfItem(atPath: url.path)
++                    guard attributes[.type] as? FileAttributeType != .typeSymbolicLink else {
++                        throw CocoaError(.fileWriteInvalidFileName)
++                    }
++                } catch let error as NSError where error.domain == NSCocoaErrorDomain &&
++                    [NSFileReadNoSuchFileError, NSFileNoSuchFileError].contains(error.code) { }
++            }
++            return url
++        }
++        let folder = try target("common/" + folderName)
++        let journal = try target("downloading/\(appID)")
++        let recordURL = try target("appmanifest_\(appID).acf")
++        var shared: [URL] = []
++        if let state = record(appID: appID, steamApps: root) {
+             for (_, owner) in (state["SharedDepots"]?.fields ?? [:]).sorted(by: { $0.key < $1.key }).prefix(64) {
+-                guard let ownerID = owner.string.flatMap({ Int($0) }), ownerID > 0, ownerID != appID,
+-                      let ownerState = record(appID: ownerID, steamApps: steamApps),
++                guard let ownerID = owner.string.flatMap({ Int($0) }), ownerID > 0, ownerID != appID else { continue }
++                let ownerURL = try target("appmanifest_\(ownerID).acf")
++                guard let ownerState = record(appID: ownerID, steamApps: root),
+                       let dir = ownerState["installdir"]?.string,
+-                      safeFolderName(dir).caseInsensitiveCompare(safeFolderName(folderName)) == .orderedSame
+-                else { continue }
+-                try? fm.removeItem(at: steamApps.appendingPathComponent("appmanifest_\(ownerID).acf"))
++                      dir.caseInsensitiveCompare(folderName) == .orderedSame else { continue }
++                shared.append(ownerURL)
+             }
+         }
+-        try? fm.removeItem(at: recordURL)
+-        try? fm.removeItem(at: steamApps.appendingPathComponent("downloading/\(appID)", isDirectory: true))
++        // Missing targets are already removed; every other I/O failure is real.
++        // Keep the primary install record until all payload/journal work succeeds.
++        for url in [folder, journal] + shared + [recordURL] {
++            do { try fm.removeItem(at: url) }
++            catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError { }
++        }
+     }
+ 
+     /// Validates a manifest path and folds directory spelling to the first
+diff --git a/app/Madeira/SteamKeyValues.swift b/app/Madeira/SteamKeyValues.swift
+index 0ded498..25f0ed6 100644
+--- a/app/Madeira/SteamKeyValues.swift
++++ b/app/Madeira/SteamKeyValues.swift
+@@ -5,7 +5,8 @@
+ import Foundation
+ 
+ // Valve's text KeyValues format is used for library folders and app manifests.
+-// Keep this reader independent of the UI and never write Steam's own files.
++// Keep this reader independent of the UI. SteamLibraryFolders serializes only
++// the explicitly registered library metadata; discovery remains read-only.
+ indirect enum SteamValue: Sendable {
+     case text(String)
+     case object([String: SteamValue])
+diff --git a/app/Madeira/SteamStorage.swift b/app/Madeira/SteamStorage.swift
+new file mode 100644
+index 0000000..31f8d88
+--- /dev/null
++++ b/app/Madeira/SteamStorage.swift
+@@ -0,0 +1,511 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Copyright 2026 David Brookes
++// Madeira Converter Exception: see LICENSE-EXCEPTION.md
++
++import Foundation
++#if canImport(Glibc)
++import Glibc
++#endif
++
++/// Query the actual destination while its security scope is held. Some volumes
++/// report zero for important-usage capacity despite having ordinary free space.
++enum SteamStorageCapacity {
++    nonisolated static func resolve(important: Int64?, ordinary: Int64?, filesystem: Int64?) throws -> Int64 {
++        let known = [important, ordinary, filesystem].compactMap { $0 }.filter { $0 >= 0 }
++        guard let available = known.max() else { throw CocoaError(.fileReadUnknown) }
++        return available
++    }
++
++    nonisolated static func availableBytes(at destination: URL) throws -> Int64 {
++        // Start with a fresh URL so a previous capacity observation is not cached.
++        let url = URL(fileURLWithPath: destination.path)
++        var important: Int64?
++        #if canImport(Darwin)
++        important = (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
++            .volumeAvailableCapacityForImportantUsage
++        #endif
++        if let important, important > 0 { return important }
++        let ordinary = (try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
++            .volumeAvailableCapacity.map { Int64($0) }
++        let attributes = try? FileManager.default.attributesOfFileSystem(forPath: url.path)
++        let filesystem = (attributes?[.systemFreeSize] as? NSNumber)?.int64Value
++        // A genuine zero remains zero. Failed queries never become unlimited space.
++        return try resolve(important: important, ordinary: ordinary, filesystem: filesystem)
++    }
++}
++
++enum SteamStorageOperation {
++    /// A network/depot failure is not evidence that a healthy volume vanished.
++    /// Cancellation must not trigger another provider lookup or change availability.
++    static func run<Value>(_ operation: () async throws -> Value,
++                           validate: () async throws -> Void) async throws -> Value {
++        let value: Value
++        do { value = try await operation() }
++        catch {
++            if error is CancellationError { throw error }
++            try await validate()
++            throw error
++        }
++        try await validate()
++        return value
++    }
++}
++
++/// Persistent identity is independent of the removable volume's current mount path.
++struct SteamStorageLibrary: Codable, Equatable, Identifiable, Sendable {
++    static let internalID = "internal"
++    let id: String
++    var name: String
++    var bookmark: Data?
++    var windowsDrive: String { id == Self.internalID ? "C" : "E" }
++    static let internalLibrary = Self(id: internalID, name: "iPad", bookmark: nil)
++}
++
++/// A saved location never contains a removable volume's native mount path.
++/// Missing library IDs in older records mean the existing internal library.
++struct SteamStorageLocation: Codable, Equatable, Sendable {
++    let libraryID: String
++    let relativePath: String
++
++    init(libraryID: String = SteamStorageLibrary.internalID, relativePath: String) throws {
++        guard libraryID == SteamStorageLibrary.internalID || UUID(uuidString: libraryID) != nil else {
++            throw SteamStorageError.invalidRecord
++        }
++        _ = try SteamStoragePath.components(relativePath)
++        self.libraryID = libraryID
++        self.relativePath = relativePath
++    }
++
++    private enum CodingKeys: String, CodingKey { case libraryID, relativePath }
++    init(from decoder: Decoder) throws {
++        let fields = try decoder.container(keyedBy: CodingKeys.self)
++        try self.init(libraryID: fields.decodeIfPresent(String.self, forKey: .libraryID) ?? SteamStorageLibrary.internalID,
++                      relativePath: fields.decode(String.self, forKey: .relativePath))
++    }
++
++    func windowsPath(in library: SteamStorageLibrary) throws -> String {
++        guard library.id == libraryID else { throw SteamStorageError.unavailable(.identityMismatch) }
++        return try SteamStoragePath.windows(relativePath, library: library)
++    }
++
++    /// `root` must come from the matching library's live access operation.
++    func nativeURL(in library: SteamStorageLibrary, root: URL) throws -> URL {
++        guard library.id == libraryID else { throw SteamStorageError.unavailable(.identityMismatch) }
++        if libraryID != SteamStorageLibrary.internalID { try SteamStorageIdentity.verify(libraryID, root: root) }
++        return try SteamStoragePath.native(relativePath, root: root)
++    }
++}
++
++/// Persisted before queueing the first byte. A partial install keeps its original
++/// library after restart; updates and repairs cannot silently change it either.
++struct SteamStorageAssignment: Codable, Equatable, Sendable {
++    let appID: Int
++    let location: SteamStorageLocation
++    var name: String
++    var installed: Bool
++    var buildID: Int?
++    var bytes: Int64?
++    /// Optional for catalogs written before queue-state persistence. A paused
++    /// update remains pending even though its old install record still exists.
++    var pending: Bool?
++    /// Display snapshot only; the downloader still verifies its SSD journals on resume.
++    var transferProgress: SteamStorageTransferProgress?
++}
++
++struct SteamStorageTransferProgress: Codable, Equatable, Sendable {
++    let doneBytes: UInt64
++    let totalBytes: UInt64
++}
++
++/// Metadata stays internal so unavailable games and partial downloads remain
++/// visible. Payloads, manifests, journals and depot caches stay at `location`.
++/// All mutation is transactional: a failed save leaves the prior catalog intact.
++struct SteamStorageCatalog: Codable, Equatable {
++    private(set) var version = 1
++    private(set) var external: SteamStorageLibrary?
++    private(set) var assignments: [Int: SteamStorageAssignment] = [:]
++
++    init() {}
++
++    func library(_ id: String) throws -> SteamStorageLibrary {
++        if id == SteamStorageLibrary.internalID { return .internalLibrary }
++        guard let external, external.id == id else { throw SteamStorageError.invalidRecord }
++        return external
++    }
++
++    mutating func register(_ library: SteamStorageLibrary) throws {
++        guard UUID(uuidString: library.id) != nil, let bookmark = library.bookmark, !bookmark.isEmpty,
++              external == nil || external?.id == library.id else { throw SteamStorageError.invalidRecord }
++        external = library
++    }
++
++    mutating func assign(_ assignment: SteamStorageAssignment) throws {
++        guard assignment.appID > 0, assignment.appID < Int(UInt32.max) else { throw SteamStorageError.invalidRecord }
++        _ = try library(assignment.location.libraryID)
++        if let existing = assignments[assignment.appID], existing.location != assignment.location {
++            throw SteamStorageError.invalidRecord
++        }
++        var next = assignment
++        if next.pending == nil { next.pending = assignments[assignment.appID]?.pending }
++        if next.pending == true, next.transferProgress == nil {
++            next.transferProgress = assignments[assignment.appID]?.transferProgress
++        }
++        if next.pending == false { next.transferProgress = nil }
++        assignments[assignment.appID] = next
++    }
++
++    /// Only call after successful payload/record deletion under live access.
++    mutating func remove(appID: Int) { assignments.removeValue(forKey: appID) }
++
++    func validate() throws {
++        guard version == 1, assignments.count <= 100_000 else { throw SteamStorageError.invalidRecord }
++        if let external {
++            guard UUID(uuidString: external.id) != nil, let bookmark = external.bookmark,
++                  !bookmark.isEmpty, bookmark.count <= 1 << 20 else { throw SteamStorageError.invalidRecord }
++        }
++        for (key, value) in assignments {
++            guard key == value.appID, key > 0, key < Int(UInt32.max),
++                  value.name.utf8.count <= 4096, (value.bytes ?? 0) >= 0 else { throw SteamStorageError.invalidRecord }
++            _ = try library(value.location.libraryID)
++            _ = try SteamStoragePath.components(value.location.relativePath)
++        }
++    }
++
++    static func load(from file: URL) throws -> Self {
++        let data: Data
++        do { data = try Data(contentsOf: file) }
++        catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
++            return Self()
++        }
++        guard data.count <= 16 << 20 else { throw SteamStorageError.invalidRecord }
++        let catalog = try JSONDecoder().decode(Self.self, from: data)
++        try catalog.validate()
++        return catalog
++    }
++
++    mutating func transaction(file: URL, _ edit: (inout Self) throws -> Void) throws {
++        var next = self
++        try edit(&next)
++        try next.validate()
++        let data = try JSONEncoder().encode(next)
++        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
++        try data.write(to: file, options: .atomic)
++        self = next
++    }
++}
++
++enum SteamStorageAvailability: String, Codable {
++    case available, disconnected, permissionDenied, readOnly, identityMismatch
++}
++
++enum SteamStorageError: Error, LocalizedError {
++    case unavailable(SteamStorageAvailability), unsafePath, unsupportedLocation, invalidRecord, mappingConflict
++    var errorDescription: String? {
++        switch self {
++        case .unavailable(.disconnected): return "Reconnect the registered SSD and try again."
++        case .unavailable(.permissionDenied): return "Select the registered folder again to renew access."
++        case .unavailable(.readOnly): return "The SSD is read-only."
++        case .unavailable(.identityMismatch): return "This is not the registered library folder. Select the original folder."
++        case .unavailable(.available): return "The library could not be accessed."
++        case .unsafePath: return "The requested path leaves the registered library."
++        case .unsupportedLocation: return "Select a dedicated folder on a locally attached drive. Cloud and network folders are unsupported."
++        case .invalidRecord: return "The saved library registration is invalid."
++        case .mappingConflict: return "The Windows SSD drive mapping is already in use. The registered library folder is unchanged."
++        }
++    }
++}
++
++/// Replace only an owned symlink; never replace a directory or payload. The
++/// caller establishes ownership from internal metadata before calling this.
++enum SteamStorageMapping {
++    static func replace(_ link: URL, root: URL, libraryID: String, ownerID: String?) throws {
++        try SteamStorageIdentity.verify(libraryID, root: root)
++        let fm = FileManager.default
++        do {
++            let attributes = try fm.attributesOfItem(atPath: link.path)
++            guard attributes[.type] as? FileAttributeType == .typeSymbolicLink else {
++                throw SteamStorageError.mappingConflict
++            }
++            let sameTarget = link.resolvingSymlinksInPath().standardizedFileURL.path == root.resolvingSymlinksInPath().standardizedFileURL.path
++            guard ownerID == libraryID || sameTarget else { throw SteamStorageError.mappingConflict }
++        } catch let error as NSError where error.domain == NSCocoaErrorDomain &&
++            [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code) { }
++        let temporary = link.deletingLastPathComponent().appendingPathComponent(".madeira-link-" + UUID().uuidString)
++        try fm.createSymbolicLink(at: temporary, withDestinationURL: root)
++        defer { try? fm.removeItem(at: temporary) }
++        guard rename(temporary.path, link.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
++    }
++}
++
++/// Paths within a registered game library.
++/// Callers must keep external access and coordination active while using URLs.
++enum SteamStoragePath {
++    static let externalAlias = "MadeiraExternalLibrary"
++    static let externalWindowsRoot = "C:\\" + externalAlias
++
++    static func components(_ relative: String) throws -> [String] {
++        let normalized = relative.replacingOccurrences(of: "\\", with: "/")
++        let parts = normalized.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
++        guard !parts.isEmpty, parts.count <= 64, normalized.utf8.count < 4096,
++              parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." &&
++                  !$0.contains(":") && !$0.unicodeScalars.contains(where: { $0.value < 32 }) }) else {
++            throw SteamStorageError.unsafePath
++        }
++        return parts
++    }
++
++    static func native(_ relative: String, root: URL) throws -> URL {
++        let base = root.resolvingSymlinksInPath().standardizedFileURL
++        let parts = try components(relative)
++        var candidate = base
++        for part in parts {
++            candidate.appendPathComponent(part)
++            // Resolving a whole nonexistent leaf can leave an existing symlink
++            // ancestor unresolved on Darwin. Check each component, including
++            // dangling links, before appending the next one.
++            do {
++                let attributes = try FileManager.default.attributesOfItem(atPath: candidate.path)
++                if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
++                    throw SteamStorageError.unsafePath
++                }
++            } catch let error as NSError where error.domain == NSCocoaErrorDomain &&
++                [NSFileReadNoSuchFileError, NSFileNoSuchFileError].contains(error.code) { }
++        }
++
++        return candidate
++    }
++
++    static func windows(_ relative: String, library: SteamStorageLibrary) throws -> String {
++        library.windowsDrive + ":\\" + (try components(relative)).joined(separator: "\\")
++    }
++}
++
++/// The marker prevents a different disk mounted at the old URL from inheriting
++/// an install identity. It is not an authentication secret. Never recreate a
++/// missing marker during reconnect: that requires an explicit new registration.
++enum SteamStorageIdentity {
++    static let marker = ".madeira-library-id"
++
++    static func verify(_ id: String, root: URL) throws {
++        let url = try SteamStoragePath.native(marker, root: root)
++        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
++        guard values.isRegularFile == true, values.isSymbolicLink != true,
++              (values.fileSize ?? 1024) <= 128,
++              try String(contentsOf: url, encoding: .utf8) == id else {
++            throw SteamStorageError.unavailable(.identityMismatch)
++        }
++    }
++
++    static func register(root: URL) throws -> String {
++        let url = try SteamStoragePath.native(marker, root: root)
++        // A registration can adopt an existing valid marker, never overwrite it.
++        if FileManager.default.fileExists(atPath: url.path) {
++            let values = try url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
++            guard values.isSymbolicLink != true, (values.fileSize ?? 1024) <= 128 else {
++                throw SteamStorageError.invalidRecord
++            }
++            let id = try String(contentsOf: url, encoding: .utf8)
++            guard UUID(uuidString: id) != nil else { throw SteamStorageError.invalidRecord }
++            try verify(id, root: root)
++            return id
++        }
++        let id = UUID().uuidString
++        try Data(id.utf8).write(to: url, options: .withoutOverwriting)
++        return id
++    }
++}
++
++/// Bridges a coordinated synchronous accessor to an async downloader/save task.
++/// Cancellation reaches the task, but the accessor cannot return (and release
++/// access) until that task has actually finished closing its files.
++final class SteamStorageAsyncWork<Value: Sendable>: @unchecked Sendable {
++    private let lock = NSLock()
++    private let finished = DispatchSemaphore(value: 0)
++    private var task: Task<Void, Never>?
++    private var cancelled = false
++    private var started = false
++    private var outcome: Result<Value, Error>?
++
++    func cancel() {
++        lock.lock()
++        cancelled = true
++        task?.cancel()
++        lock.unlock()
++    }
++
++    /// Invoke exactly once, from a worker, inside the coordinated accessor.
++    func execute(_ operation: @escaping @Sendable () async throws -> Value) throws -> Value {
++        lock.lock()
++        precondition(!started, "An access operation can only execute once")
++        started = true
++        if cancelled { lock.unlock(); throw CancellationError() }
++        let work = Task.detached { [self] in
++            let result: Result<Value, Error>
++            do {
++                try Task.checkCancellation()
++                result = .success(try await operation())
++            } catch { result = .failure(error) }
++            lock.withLock { outcome = result }
++            finished.signal()
++        }
++        task = work
++        if cancelled { work.cancel() }
++        lock.unlock()
++        finished.wait()
++        return try lock.withLock {
++            task = nil
++            return try outcome!.get()
++        }
++    }
++}
++
++#if os(iOS) || os(macOS)
++/// Shared operation/session access. The coordinator's worker retains only the
++/// completion semaphore; the last client releases access when its lease dies.
++final class SteamExternalLease: @unchecked Sendable {
++    let root: URL
++    let library: SteamStorageLibrary
++    let writable: Bool
++    private let finished: DispatchSemaphore
++    private init(root: URL, library: SteamStorageLibrary, writable: Bool, finished: DispatchSemaphore) {
++        self.root = root; self.library = library; self.writable = writable; self.finished = finished
++    }
++    deinit { finished.signal() }
++    /// Use in defer to keep the lease alive across every await and final handle close.
++    func keepAlive() {}
++    func validate() throws { try SteamStorageIdentity.verify(library.id, root: root) }
++
++    static func open(_ library: SteamStorageLibrary) async throws -> SteamExternalLease {
++        try Task.checkCancellation()
++        return try await withCheckedThrowingContinuation { continuation in
++            DispatchQueue.global(qos: .utility).async {
++                var delivered = false
++                func enter(write: Bool) throws {
++                    var updated = library
++                    _ = try SteamExternalAccess.withLibrary(library, write: write, registrationUpdated: { updated = $0 }) { root in
++                        let finished = DispatchSemaphore(value: 0)
++                        delivered = true
++                        continuation.resume(returning: SteamExternalLease(root: root, library: updated, writable: write, finished: finished))
++                        finished.wait()
++                    }
++                }
++                do {
++                    do { try enter(write: true) }
++                    catch where !delivered && SteamExternalAccess.availability(for: error) == .readOnly { try enter(write: false) }
++                } catch {
++                    if !delivered { continuation.resume(throwing: error) }
++                }
++            }
++        }
++    }
++}
++
++/// One balanced scope and a coordinated accessor cover the *whole* synchronous
++/// operation, including all POSIX handles and mappings. Run on a worker queue.
++/// Never return an open handle, mmap pointer or task from this accessor.
++/// A Wine session will require an accessor that ends only when Wine has stopped;
++/// this data probe does not claim to have established that runtime contract.
++enum SteamExternalAccess {
++    /// Coordinates the entire async operation, including cancellation cleanup.
++    /// The refreshed registration is returned only after the accessor has ended.
++    /// Never let the closure return a live handle or a task using the root.
++    static func perform<Value: Sendable>(_ library: SteamStorageLibrary, write: Bool,
++                                         _ operation: @escaping @Sendable (URL) async throws -> Value) async throws -> (Value, SteamStorageLibrary) {
++        let work = SteamStorageAsyncWork<Value>()
++        return try await withTaskCancellationHandler {
++            try await withCheckedThrowingContinuation { continuation in
++                DispatchQueue.global(qos: .utility).async {
++                    continuation.resume(with: Result {
++                        try withLibrary(library, write: write) { root in
++                            try work.execute { try await operation(root) }
++                        }
++                    })
++                }
++            }
++        } onCancel: { work.cancel() }
++    }
++
++    static func coordinate<T>(url: URL, write: Bool, _ body: (URL) throws -> T) throws -> T {
++        guard url.startAccessingSecurityScopedResource() else {
++            throw SteamStorageError.unavailable(.permissionDenied)
++        }
++        defer { url.stopAccessingSecurityScopedResource() }
++        if write, try url.resourceValues(forKeys: [.volumeIsReadOnlyKey]).volumeIsReadOnly == true {
++            throw SteamStorageError.unavailable(.readOnly)
++        }
++        var coordinationError: NSError?
++        var outcome: Result<T, Error>?
++        let coordinator = NSFileCoordinator()
++        if write {
++            coordinator.coordinate(writingItemAt: url, options: .forMerging, error: &coordinationError) {
++                scoped in outcome = Result { try body(scoped) }
++            }
++        } else {
++            coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) {
++                scoped in outcome = Result { try body(scoped) }
++            }
++        }
++        if let coordinationError { throw coordinationError }
++        guard let outcome else { throw SteamStorageError.unavailable(.disconnected) }
++        return try outcome.get()
++    }
++
++    static func register(_ url: URL, replacing current: SteamStorageLibrary? = nil) throws -> SteamStorageLibrary {
++        try coordinate(url: url, write: true) { root in
++            let values = try root.resourceValues(forKeys: [.isDirectoryKey, .isUbiquitousItemKey, .volumeIsLocalKey, .volumeIsReadOnlyKey])
++            guard values.isDirectory == true, values.isUbiquitousItem != true, values.volumeIsLocal == true else {
++                throw SteamStorageError.unsupportedLocation
++            }
++            guard values.volumeIsReadOnly != true else { throw SteamStorageError.unavailable(.readOnly) }
++            let id: String
++            if let current {
++                try SteamStorageIdentity.verify(current.id, root: root)
++                id = current.id
++            } else { id = try SteamStorageIdentity.register(root: root) }
++            return SteamStorageLibrary(id: id, name: root.lastPathComponent,
++                                       bookmark: try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil))
++        }
++    }
++
++    /// Return refreshed bookmark data alongside the result; the caller persists it
++    /// only after identity validation. No fallback to an internal path on failure.
++    static func withLibrary<T>(_ library: SteamStorageLibrary, write: Bool,
++                               registrationUpdated: ((SteamStorageLibrary) -> Void)? = nil,
++                               _ body: (URL) throws -> T) throws -> (T, SteamStorageLibrary) {
++        guard library.id != SteamStorageLibrary.internalID, let bookmark = library.bookmark else {
++            throw SteamStorageError.invalidRecord
++        }
++        var stale = false
++        let url = try URL(resolvingBookmarkData: bookmark, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &stale)
++        return try coordinate(url: url, write: write) { root in
++            try SteamStorageIdentity.verify(library.id, root: root)
++            let values = try root.resourceValues(forKeys: [.volumeIsReadOnlyKey])
++            if write && values.volumeIsReadOnly == true { throw SteamStorageError.unavailable(.readOnly) }
++            var updated = library
++            if stale { updated.bookmark = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) }
++            registrationUpdated?(updated)
++            return (try body(root), updated)
++        }
++    }
++
++    static func availability(for error: Error) -> SteamStorageAvailability {
++        if case SteamStorageError.unavailable(let state) = error { return state }
++        var current: NSError? = error as NSError
++        // Providers can wrap the filesystem error. Bound traversal in case a
++        // malformed error chain repeats; don't turn permissions into "unplugged".
++        for _ in 0..<8 {
++            guard let e = current else { break }
++            if e.domain == NSCocoaErrorDomain {
++                if [NSFileReadNoPermissionError, NSFileWriteNoPermissionError].contains(e.code) { return .permissionDenied }
++                if e.code == NSFileWriteVolumeReadOnlyError { return .readOnly }
++            }
++            if e.domain == NSPOSIXErrorDomain {
++                if [Int(EACCES), Int(EPERM)].contains(e.code) { return .permissionDenied }
++                if e.code == Int(EROFS) { return .readOnly }
++            }
++            current = e.userInfo[NSUnderlyingErrorKey] as? NSError
++        }
++        return .disconnected
++    }
++}
++#endif
+diff --git a/app/Madeira/SteamStorageNative.h b/app/Madeira/SteamStorageNative.h
+new file mode 100644
+index 0000000..8b98f0f
+--- /dev/null
++++ b/app/Madeira/SteamStorageNative.h
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Copyright 2026 David Brookes
++// Madeira Converter Exception: see LICENSE-EXCEPTION.md
++#pragma once
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <limits.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <sys/stat.h>
++
++/* Resolve E: only while the app has supplied a registered identity and installed
++ * its mapping under a live security scope. No drive guessing or Z: fallback.
++ * C: keeps the existing prefix/farm behavior, including bundled system links. */
++static int madeira_storage_native(const char *prefix, const char *guest, char *out, size_t size)
++{
++    if (!prefix || !guest || strlen(guest) < 3 || guest[1] != ':' || guest[2] != '\\') return -1;
++    int external = guest[0] == 'E' || guest[0] == 'e';
++    if (!external && guest[0] != 'C' && guest[0] != 'c') return -1;
++    char root[PATH_MAX], path[PATH_MAX];
++    if (external) {
++        const char *identity = getenv("MADEIRA_EXTERNAL_LIBRARY_ID");
++        if (!identity || strlen(identity) != 36 || strspn(identity, "0123456789abcdefABCDEF-") != 36) return -1;
++        if (snprintf(path, sizeof(path), "%s/dosdevices/e:", prefix) >= (int)sizeof(path)) return -1;
++        struct stat st;
++        if (lstat(path, &st) || !S_ISLNK(st.st_mode) || !realpath(path, root)) return -1;
++        if (snprintf(path, sizeof(path), "%s/.madeira-library-id", root) >= (int)sizeof(path)) return -1;
++        int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
++        if (fd < 0) return -1;
++        char marker[128];
++        ssize_t n = read(fd, marker, sizeof(marker));
++        int regular = !fstat(fd, &st) && S_ISREG(st.st_mode);
++        close(fd);
++        if (!regular || n != 36 || memcmp(marker, identity, 36)) return -1;
++    } else if (snprintf(root, sizeof(root), "%s/drive_c", prefix) >= (int)sizeof(root)) return -1;
++    if (strlen(root) >= size) return -1;
++    strcpy(out, root);
++    const char *part = guest + 3;
++    while (*part) {
++        const char *end = strchr(part, '\\');
++        size_t n = end ? (size_t)(end - part) : strlen(part);
++        if (!n || n > 255 || (n == 1 && part[0] == '.') ||
++            (n == 2 && part[0] == '.' && part[1] == '.') || part[n - 1] == ' ' || part[n - 1] == '.') return -1;
++        for (size_t i = 0; i < n; i++) if ((unsigned char)part[i] < 32 || strchr("/:\"*?<>|", part[i])) return -1;
++        size_t used = strlen(out);
++        if (used + n + 2 > size) return -1;
++        out[used++] = '/'; memcpy(out + used, part, n); out[used + n] = 0;
++        if (external) {
++            struct stat st;
++            if (lstat(out, &st) || S_ISLNK(st.st_mode)) return -1;
++        }
++        if (!end) break;
++        part = end + 1;
++    }
++    return 0;
++}
+diff --git a/app/Madeira/WineProcessBridge.m b/app/Madeira/WineProcessBridge.m
+index 500d547..95369b9 100644
+--- a/app/Madeira/WineProcessBridge.m
++++ b/app/Madeira/WineProcessBridge.m
+@@ -28,6 +28,7 @@
+ #include <sys/sysctl.h>
+ 
+ #include "WineProcessBridge.h"
++#include "SteamStorageNative.h"
+ #include "WineServerBridge.h"
+ #include "PrefixExtractor.h"
+ #include "FEXBridge.h"  // fex_get_jit_write_offset()
+@@ -511,6 +512,10 @@ static uint16_t madeira_target_machine(const char *exe, const char *prefix, NSSt
+             return 0;
+         for (char *p = probe + skip; *p; p++) if (*p == '\\') *p = '/';
+     }
++    else if ((exe[0] == 'E' || exe[0] == 'e') && exe[1] == ':' && exe[2] == '\\')
++    {
++        if (madeira_storage_native(prefix, exe, probe, sizeof(probe))) return 0;
++    }
+     else if (strchr(exe, '\\') || (exe[0] && exe[1] == ':'))
+         return 0;
+     else
+@@ -1033,6 +1038,7 @@ static void madeira_publish_host_probe(void)
+         const char *dock_session = getenv("MADEIRA_DOCK_SESSION");
+         const char *direct_app = getenv("MADEIRA_STEAM_APPID");    /* set by the library for one direct Steam start (Start with: The game); not a setting */
+         const char *direct_path = getenv("MADEIRA_STEAM_APPPATH"); /* that game's install folder, with MADEIRA_STEAM_APPID; not a setting */
++        char direct_native[PATH_MAX];
+         if (dock_session && dock_session[0] == '1') {
+             unsetenv("SteamAppPath");
+             unsetenv("SteamGameId");
+@@ -1040,7 +1046,8 @@ static void madeira_publish_host_probe(void)
+             dprintf(STDERR_FILENO, "[steam-env] Madeira Dock session: no fixed Steam game identity published\n");
+         } else if (direct_app && direct_app[0] && strlen(direct_app) <= 10 &&
+             strspn(direct_app, "0123456789") == strlen(direct_app) &&
+-            direct_path && (direct_path[0] == 'C' || direct_path[0] == 'c') && direct_path[1] == ':' &&
++            direct_path && ((direct_path[0] == 'C' || direct_path[0] == 'c') ||
++                ((direct_path[0] == 'E' || direct_path[0] == 'e') && !madeira_storage_native(g_prefix_path, direct_path, direct_native, sizeof(direct_native)))) && direct_path[1] == ':' &&
+             direct_path[2] == '\\' && strlen(direct_path) < 1024 && !strstr(direct_path, "..")) {
+             setenv("SteamAppPath", direct_path, 1);
+             setenv("SteamGameId", direct_app, 1);
+@@ -1576,14 +1583,33 @@ static void madeira_publish_host_probe(void)
+          * services batch) is what starts). */
+         const char *launch_workdir = getenv("MADEIRA_WORKDIR");   /* set by the library for one launch: the working folder (Steam's, or the entry's); not a setting */
+         char workdir[512] = "";
+-        if (launch_workdir && (launch_workdir[0] == 'C' || launch_workdir[0] == 'c') && launch_workdir[1] == ':' &&
++        if (launch_workdir && (launch_workdir[0] == 'C' || launch_workdir[0] == 'c' || launch_workdir[0] == 'E' || launch_workdir[0] == 'e') && launch_workdir[1] == ':' &&
+             launch_workdir[2] == '\\' && launch_workdir[3] && !strstr(launch_workdir, "..") &&
+             strlen(launch_workdir) < sizeof(workdir) - 2)
+             snprintf(workdir, sizeof(workdir), "%s", launch_workdir);
+         unsetenv("MADEIRA_WORKDIR");
++        if (!workdir[0] && (madeira_exe[0] == 'E' || madeira_exe[0] == 'e') && madeira_exe[1] == ':') {
++            const char *last = strrchr(madeira_exe, '\\');
++            if (last && last >= madeira_exe + 2 && (size_t)(last - madeira_exe) < sizeof(workdir) - 2) {
++                size_t n = (size_t)(last - madeira_exe);
++                memcpy(workdir, madeira_exe, n); workdir[n++] = '\\'; workdir[n] = 0;
++            }
++        }
+         /* ml1163: a typed folder may end in '\\'; MADEIRA_INITIAL_CWD gets exactly one. */
+         for (size_t n = strlen(workdir); n > 3 && workdir[n - 1] == '\\'; n--) workdir[n - 1] = 0;
+-        if (workdir[0]) {
++        if (workdir[0] == 'E' || workdir[0] == 'e') {
++            char native[PATH_MAX], wine_cwd[520];
++            if (madeira_storage_native(g_prefix_path, workdir, native, sizeof(native)) || chdir(native)) {
++                dprintf(STDERR_FILENO, "[WineProc] external working folder unavailable; launch stopped\n");
++                wine_launched_process_did_exit((int)0xC000003A);
++                g_wine_running = 0;
++                wineserver_stop();
++                return NULL;
++            }
++            setenv("PWD", native, 1);
++            snprintf(wine_cwd, sizeof(wine_cwd), "%s%s", workdir, workdir[strlen(workdir) - 1] == '\\' ? "" : "\\");
++            setenv("MADEIRA_INITIAL_CWD", wine_cwd, 1);
++        } else if (workdir[0]) {
+             char unix_dir[1024], windir[512], wine_cwd[520];
+             snprintf(windir, sizeof(windir), "%s", workdir + 3);
+             for (char *p = windir; *p; p++) if (*p == '\\') *p = '/';

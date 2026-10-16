@@ -1,0 +1,73 @@
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4745,6 +4745,47 @@
+     alt->MaximumLength = alt->Length + sizeof(WCHAR);
+     return TRUE;
+ }
++
++/* Porthole 0084: an x64 program's own folder can hold a copy of the Universal C Runtime (Rockstar's launcher folder has one). The ARM64EC emulator DLL imports the C
++ * runtime through its API-set names, which resolve to ucrtbase.dll, and the loader looks in the program's folder before System32: the emulator then got the program's x64
++ * copy, called its entry point natively (the emulator does not exist yet) and the process died with an illegal instruction. One ucrtbase.dll serves a whole process, so a
++ * copy outside the system folders is served from the ARM64EC build in sysx64 instead. MADEIRA_APP_LOCAL_UCRT=1 keeps the program's own copy. */
++static BOOL ios_app_ucrt_alt_name( const UNICODE_STRING *name, WCHAR *buf, UNICODE_STRING *alt )
++{
++    static const char leaf[] = "\\ucrtbase.dll";
++    static const char sysx64[] = "\\??\\C:\\windows\\sysx64\\ucrtbase.dll";
++    static const char *system_dirs[] = { "\\??\\C:\\windows\\system32\\", "\\??\\C:\\windows\\sysx64\\", "\\??\\C:\\windows\\syswow64\\", "\\??\\C:\\windows\\sysarm32\\" };
++    unsigned int i, j, len = name->Length / sizeof(WCHAR), llen = sizeof(leaf) - 1;
++
++    if (!name->Buffer || len <= llen + 4 || len > MAX_PATH) return FALSE;
++    for (i = 0; i < llen; i++)
++    {
++        WCHAR c = name->Buffer[len - llen + i];
++        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++        if (c == '/') c = '\\';
++        if (c != (WCHAR)leaf[i]) return FALSE;
++    }
++    for (j = 0; j < sizeof(system_dirs) / sizeof(system_dirs[0]); j++)
++    {
++        unsigned int dlen = strlen( system_dirs[j] );
++        if (len != dlen + llen - 1) continue;
++        for (i = 0; i < dlen; i++)
++        {
++            WCHAR c = name->Buffer[i], d = system_dirs[j][i];
++            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++            if (d >= 'A' && d <= 'Z') d += 'a' - 'A';
++            if (c != d && !(c == '/' && d == '\\')) break;
++        }
++        if (i == dlen) return FALSE;     /* already a system copy */
++    }
++    if (getenv( "MADEIRA_APP_LOCAL_UCRT" )) return FALSE;
++    for (i = 0; i < sizeof(sysx64) - 1; i++) buf[i] = sysx64[i];
++    buf[i] = 0;
++    alt->Buffer = buf;
++    alt->Length = (sizeof(sysx64) - 1) * sizeof(WCHAR);
++    alt->MaximumLength = alt->Length + sizeof(WCHAR);
++    return TRUE;
++}
+ #endif
+ 
+ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUTES *attr,
+@@ -4785,6 +4826,22 @@
+             {
+                 redirect_logs++;
+                 ERR( "[sysx64] 0050 %s -> %s: %08x\n", debugstr_us(attr->ObjectName), debugstr_us(&alt_name), alt_status );
++            }
++            if (!alt_status) return alt_status;
++            *handle = 0;
++        }
++        else if (ios_app_ucrt_alt_name( attr->ObjectName, alt_buf, &alt_name ) && ios_x64_process())
++        {
++            OBJECT_ATTRIBUTES alt_attr = *attr;
++            static int ucrt_logs;
++            NTSTATUS alt_status;
++
++            alt_attr.ObjectName = &alt_name;
++            alt_status = NtCreateFile( handle, access, &alt_attr, io, alloc_size, attributes, sharing, disposition, options, ea_buffer, ea_length );
++            if (ucrt_logs < 20)
++            {
++                ucrt_logs++;
++                ERR( "[ucrt] 0084 %s -> %s: %08x\n", debugstr_us(attr->ObjectName), debugstr_us(&alt_name), alt_status );
+             }
+             if (!alt_status) return alt_status;
+             *handle = 0;

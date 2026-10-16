@@ -1,0 +1,133 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -7411,7 +7411,8 @@
+  * address map, see ios_wow_band), below the CEF pools [0x7400000000,
+  * 0x7c00000000) and the FEX band [0x7c00000000, 0x8000000000).
+  */
+-#define IOS_WOW_MAX_WINDOWS 8
++#define IOS_WOW_MAX_WINDOWS 12   /* Porthole 0034: was 8; the band yields at most 9 slots, see ios_wow_leading_none */
++static int ios_wow_extra_slots(void);   /* defined with ios_wow_leading_none below */
+ #define IOS_WOW_CEF_POOLS_START ((ULONG_PTR)0x7400000000)
+ #define IOS_WOW_FEX_BAND_END    ((ULONG_PTR)0x8000000000)
+ 
+@@ -8085,7 +8086,8 @@
+ 
+     if (!map_end) return 1;
+     min_map  = (ULONG_PTR)ios_wow_env_ulong( "MADEIRA_WOW_MIN_MAP_GB", 48 ) << 30;
+-    min_free = (ULONG_PTR)ios_wow_env_ulong( "MADEIRA_WOW_MIN_FREE_GB", 8 ) << 30;
++    /* Porthole 0034: 8 left only seven windows with a 64-bit game running (11.7 GB free < 4 + 8); 6 allows the ninth */
++    min_free = (ULONG_PTR)ios_wow_env_ulong( "MADEIRA_WOW_MIN_FREE_GB", ios_wow_extra_slots() ? 6 : 8 ) << 30;
+     if (map_end < min_map)
+     {
+         dprintf( 2, "[wow-window] refused: map too small (ends at %p, MADEIRA_WOW_MIN_MAP_GB=%lu)\n",
+@@ -8135,6 +8137,62 @@
+     if (a > (mach_vm_address_t)addr) return 0;      /* free hole at addr */
+     if (info.protection != VM_PROT_NONE) return 0;  /* accessible neighbour */
+     return a + size >= (mach_vm_address_t)addr + len;
++}
++
++/* Porthole 0034: two slots of the spill band were refused for reasons that do not hold.
++ *
++ * (1) Slot 0x74: the PREVIOUS slot (0x73) owns its guard page, which sits in the first 16 KB of the next slot's range, so
++ *     "the 4GB range is not free (OCCUPIED 0x73ffff0000+0x14000 prot=0/7)". That page is PROT_NONE and lies in guest page 0,
++ *     which no guest ever uses (IOS_WOW_GUEST_FLOOR): it is as good as the window's own first page. ios_wow_leading_none()
++ *     reports how many bytes at the start of `base` are already such a region, and the window is mapped from there.
++ * (2) Slot 0x7a: the window fits but the guard page would lie past IOS_WOW_SPILL_TOP and the next page is an unmapped hole.
++ *     A hole faults on access like a guard does, so an unguarded window is accepted there (spill walk only).
++ *
++ * Ubisoft Connect's Chromium (browser, gpu, network, storage, 2-3 renderers) plus the launcher and UplayService needs 9 32-bit
++ * processes; without this there were 7 slots and the page renderer or the service had none (`guest window reserve returned
++ * 0xc0000017`, a blank white client window / "Preparing to launch your game" for ever). MADEIRA_WOW_EXTRA_SLOTS=0 turns it off. */
++static int ios_wow_extra_slots(void)
++{
++    static int cached = -1;
++    if (cached < 0)
++    {
++        const char *e = getenv( "MADEIRA_WOW_EXTRA_SLOTS" );
++        cached = !(e && *e == '0');
++    }
++    return cached;
++}
++
++static ULONG_PTR ios_wow_leading_none( ULONG_PTR base )
++{
++    mach_vm_address_t a = (mach_vm_address_t)base;
++    mach_vm_size_t size = 0;
++    vm_region_basic_info_data_64_t info;
++    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
++    mach_port_t obj = MACH_PORT_NULL;
++    mach_vm_address_t end;
++
++    if (!ios_wow_extra_slots()) return 0;
++    if (mach_vm_region( mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64,
++                        (vm_region_info_t)&info, &cnt, &obj ) != KERN_SUCCESS) return 0;
++    if (a >= (mach_vm_address_t)base) return 0;            /* nothing straddles the start */
++    if (info.protection != VM_PROT_NONE) return 0;
++    end = a + size;
++    if (end <= (mach_vm_address_t)base || end > (mach_vm_address_t)base + 0x20000) return 0;   /* only a guard-sized overlap */
++    return (ULONG_PTR)(end - (mach_vm_address_t)base);
++}
++
++static int ios_wow_neighbour_is_hole( ULONG_PTR addr, ULONG_PTR len )
++{
++    mach_vm_address_t a = (mach_vm_address_t)addr;
++    mach_vm_size_t size = 0;
++    vm_region_basic_info_data_64_t info;
++    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
++    mach_port_t obj = MACH_PORT_NULL;
++
++    if (!ios_wow_extra_slots()) return 0;
++    if (mach_vm_region( mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64,
++                        (vm_region_info_t)&info, &cnt, &obj ) != KERN_SUCCESS) return 1;   /* nothing mapped from here up */
++    return a >= (mach_vm_address_t)(addr + len);
+ }
+ 
+ static int ios_wow_window_try( ULONG_PTR base, unsigned *guard_owned )
+@@ -8177,12 +8235,17 @@
+         return 1;
+     }
+ 
++    /* Porthole 0034: a PROT_NONE guard of the previous slot that reaches into the first pages of this one is part of the window */
++    ULONG_PTR skip = ios_wow_leading_none( base );
++    if (skip) dprintf( 2, "[wow-window] 0034: B=%p starts inside a PROT_NONE guard region (0x%lx bytes): mapped from there\n",
++                       (void *)base, (unsigned long)skip );
++
+     /* preferred: the 4 GB window plus our own guard page */
+     if (ios_wow_band_ok( base, IOS_WOW_WINDOW_SIZE + guard ) &&
+-        anon_mmap_tryfixed( (void *)base, IOS_WOW_WINDOW_SIZE + guard,
++        anon_mmap_tryfixed( (void *)(base + skip), IOS_WOW_WINDOW_SIZE + guard - skip,
+                             PROT_NONE, MAP_NORESERVE ) != MAP_FAILED)
+     {
+-        mmap_add_reserved_area( (void *)base, IOS_WOW_WINDOW_SIZE + guard );
++        mmap_add_reserved_area( (void *)(base + skip), IOS_WOW_WINDOW_SIZE + guard - skip );
+         *guard_owned = 1;
+         dprintf( 2, "[wow-window] B=%p: reserved 4GB + own guard page (+0x%llx)\n",
+                  (void *)base, (unsigned long long)guard );
+@@ -8191,7 +8254,8 @@
+ 
+     /* an exactly-4GB gap: borrow the guard from the neighbour if — and only
+      * if — the neighbour is already inaccessible */
+-    if (!ios_wow_guard_neighbour_blocked( base + IOS_WOW_WINDOW_SIZE, guard ))
++    if (!ios_wow_guard_neighbour_blocked( base + IOS_WOW_WINDOW_SIZE, guard ) &&
++        !(ios_wow_spill_walk && ios_wow_neighbour_is_hole( base + IOS_WOW_WINDOW_SIZE, guard )))
+     {
+         ios_va_describe_range( (void *)(base + IOS_WOW_WINDOW_SIZE), guard, what, sizeof(what) );
+         dprintf( 2, "[wow-window] B=%p REJECTED: 4GB+guard unavailable and the page at "
+@@ -8199,7 +8263,7 @@
+                  (void *)base, (void *)(base + IOS_WOW_WINDOW_SIZE), what );
+         return 0;
+     }
+-    if (anon_mmap_tryfixed( (void *)base, IOS_WOW_WINDOW_SIZE,
++    if (anon_mmap_tryfixed( (void *)(base + skip), IOS_WOW_WINDOW_SIZE - skip,
+                             PROT_NONE, MAP_NORESERVE ) == MAP_FAILED)
+     {
+         ios_va_describe_range( (void *)base, IOS_WOW_WINDOW_SIZE, what, sizeof(what) );
+@@ -8207,7 +8271,7 @@
+                  (void *)base, what );
+         return 0;
+     }
+-    mmap_add_reserved_area( (void *)base, IOS_WOW_WINDOW_SIZE );
++    mmap_add_reserved_area( (void *)(base + skip), IOS_WOW_WINDOW_SIZE - skip );
+     dprintf( 2, "[wow-window] B=%p: reserved exactly 4GB; guard BORROWED from the "
+                 "pre-existing PROT_NONE region at %p\n",
+              (void *)base, (void *)(base + IOS_WOW_WINDOW_SIZE) );

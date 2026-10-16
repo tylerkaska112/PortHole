@@ -1,0 +1,41 @@
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -5676,7 +5676,37 @@
+                                 /* Porthole 0042: the guest stack around RSP, once (the name the game looks up may be built there). */
+                                 {
+                                     static int stack_done;
+-                                    if (!stack_done) { stack_done = 1; ios_dump_x86_code( "stack", live_rsp, 0x800, 0xa00 ); }
++                                    if (!stack_done)
++                                    {
++                                        stack_done = 1;
++                                        ios_dump_x86_code( "stack", live_rsp, 0x800, 0xa00 );
++                                        /* Porthole 0043: what the pointers on that stack point at (64 bytes each, first 200 distinct), so a name
++                                         * the game passes by pointer can be read. */
++                                        {
++                                            uint64_t *sp = (uint64_t *)(uintptr_t)(live_rsp - 0x800), seen[200];
++                                            unsigned nseen = 0, k, q;
++                                            for (q = 0; q < 0x1200 / 8 && nseen < 200; q++)
++                                            {
++                                                uint64_t v = 0, tgt;
++                                                uint8_t mem[64];
++                                                mach_vm_size_t gotp = 0;
++                                                if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(uintptr_t)(sp + q), 8, (mach_vm_address_t)&v, &gotp ) != KERN_SUCCESS || gotp != 8) continue;
++                                                tgt = v;
++                                                if (tgt < 0x100000000ULL || tgt >= 0x800000000000ULL) continue;
++                                                if (tgt >= live_rsp - 0x800 && tgt < live_rsp + 0xa00) continue;
++                                                for (k = 0; k < nseen; k++) if (seen[k] == tgt) break;
++                                                if (k < nseen) continue;
++                                                seen[nseen++] = tgt;
++                                                if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)tgt, sizeof(mem), (mach_vm_address_t)mem, &gotp ) == KERN_SUCCESS && gotp)
++                                                {
++                                                    char row[sizeof(mem) * 2 + 1];
++                                                    size_t j;
++                                                    for (j = 0; j < gotp; j++) snprintf( row + j * 2, 3, "%02x", mem[j] );
++                                                    dprintf( STDERR_FILENO, "[x86_ptr] slot=%llx -> %llx: %s\n", (unsigned long long)(live_rsp - 0x800 + q * 8), (unsigned long long)tgt, row );
++                                                }
++                                            }
++                                        }
++                                    }
+                                 }
+ 
+                                 /* ml382 CALLER HUNT for the "-1 pointer" family.

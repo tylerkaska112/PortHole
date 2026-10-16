@@ -1,0 +1,2261 @@
+diff -ruN a/build/ntdll-unix/build.sh b/build/ntdll-unix/build.sh
+--- a/build/ntdll-unix/build.sh
++++ b/build/ntdll-unix/build.sh
+@@ -113,6 +113,12 @@
+ compile_unixlib "$CRYPTO_DIR/crypt32_unixlib_ios.c" "crypt32_unixlib" "crypt32" \
+     -I"$WINE_SRC/dlls/crypt32" -I"$GNUTLS_PREFIX/include" \
+     -include "$CRYPTO_DIR/ios_gnutls_shim.h"
++# OpenGL: opengl32's unix side (wrappers + generated thunks). It dispatches to
++# win32u's WGL layer, whose iOS driver is build/win32u-unix/opengl_ios.c.
++compile_unixlib "$WINE_SRC/dlls/opengl32/unix_wgl.c" "opengl32_wgl" "opengl32" \
++    -I"$WINE_SRC/dlls/opengl32"
++compile_unixlib "$WINE_SRC/dlls/opengl32/unix_thunks.c" "opengl32_thunks" "opengl32" \
++    -I"$WINE_SRC/dlls/opengl32"
+ # iOS-Madeira 2026-08-03 (#79 transport): in-process NSI TCP connection
+ # tables (nsiproxy.sys is not shipped; PE nsi.dll falls back to this).
+ compile_one "$BUILD_DIR/nsi_unixlib_ios.c" "nsi_unixlib_ios"
+@@ -211,7 +217,7 @@
+     "$OBJ_DIR/nsi_network_ios.o" "$OBJ_DIR/nsi_ndis.o" "$OBJ_DIR/nsi_ip.o" \
+     "$OBJ_DIR/gnutls_symtab_ios.o" "$OBJ_DIR/ws2_32_unixlib.o" \
+     "$OBJ_DIR/bcrypt_unixlib.o" "$OBJ_DIR/secur32_unixlib.o" "$OBJ_DIR/crypt32_unixlib.o" \
+-    "$OBJ_DIR/dwrite_unixlib.o" "$OBJ_DIR/dnsapi_unixlib.o" \
++    "$OBJ_DIR/dwrite_unixlib.o" "$OBJ_DIR/dnsapi_unixlib.o" "$OBJ_DIR/opengl32_wgl.o" "$OBJ_DIR/opengl32_thunks.o" \
+     "$OBJ_DIR/winegstreamer_unixlib.o" "$OBJ_DIR/wg_parser_apple_ios.o" \
+     "$OBJ_DIR/cdrom.o" "$OBJ_DIR/debug.o" "$OBJ_DIR/env.o" "$OBJ_DIR/file.o" \
+     "$OBJ_DIR/loader.o" "$OBJ_DIR/loadorder.o" "$OBJ_DIR/process.o" "$OBJ_DIR/registry.o" \
+diff -ruN a/build/ntdll-unix/env_ios.c b/build/ntdll-unix/env_ios.c
+--- a/build/ntdll-unix/env_ios.c
++++ b/build/ntdll-unix/env_ios.c
+@@ -898,7 +898,7 @@
+         /* iOS DIAGNOSTIC: log env vars containing "Steam" or known Thumper-relevant keys */
+         if (STARTS_WITH(str, "Steam") || STARTS_WITH(str, "SteamAppPath") ||
+             STARTS_WITH(str, "SteamGameId") || STARTS_WITH(str, "SteamAppId") ||
+-            STARTS_WITH(str, "FNA3D_") || STARTS_WITH(str, "MONO_") ||
++            STARTS_WITH(str, "FNA3D_") || STARTS_WITH(str, "MONO_") || STARTS_WITH(str, "LOVE_") ||
+             STARTS_WITH(str, "MADEIRA_JIT_WRITE_OFFSET"))
+             fprintf(stderr, "[iOS env] processing: %s\n", str);
+ 
+@@ -931,7 +931,7 @@
+ 
+         ptr += ntdll_umbstowcs( str, strlen(str) + 1, ptr, end - ptr );
+         if (STARTS_WITH(str, "Steam") || STARTS_WITH(str, "FNA3D_") || STARTS_WITH(str, "MONO_") ||
+-            STARTS_WITH(str, "MADEIRA_JIT_WRITE_OFFSET"))
++            STARTS_WITH(str, "LOVE_") || STARTS_WITH(str, "MADEIRA_JIT_WRITE_OFFSET"))
+             fprintf(stderr, "[iOS env] INCLUDED: %s\n", str);
+     }
+     *pos = ptr - env;
+diff -ruN a/build/ntdll-unix/process_ios.c b/build/ntdll-unix/process_ios.c
+--- a/build/ntdll-unix/process_ios.c
++++ b/build/ntdll-unix/process_ios.c
+@@ -935,6 +935,62 @@
+ }
+ 
+ #ifdef WINE_IOS
++/* Read a whole file into a malloc'd buffer; returns its size or -1. */
++static long ios_read_whole_file( const char *path, char **data )
++{
++    long size = -1;
++    FILE *f;
++
++    *data = NULL;
++    if (!(f = fopen( path, "rb" ))) return -1;
++    if (!fseek( f, 0, SEEK_END ) && (size = ftell( f )) > 0 && !fseek( f, 0, SEEK_SET ) &&
++        (*data = malloc( size )) && fread( *data, 1, size, f ) != (size_t)size)
++    {
++        free( *data );
++        *data = NULL;
++    }
++    fclose( f );
++    return *data ? size : -1;
++}
++
++/* Madeira: undo the old on-disk LuaJIT swap.
++ *
++ * Builds before the wineserver substitution (build/wineserver/luajit_compat.c)
++ * wrote the bundled GC64 lua51.dll into LOVE game folders and kept the game's
++ * own copy as lua51.dll.madeira-orig. The substitution now happens when the DLL
++ * is mapped, so put the game's file back: only when lua51.dll is byte-for-byte
++ * the bundled build, so a game update that replaced it is left alone.
++ * Remove once no installs carry the old swap. */
++static void ios_luajit_swap_restore( const char *exe_unix_name )
++{
++    char dir[4096], game_dll[4200], orig_dll[4200], ours_path[4200];
++    const char *bundle = getenv( "WINEDLLPATH" ), *slash;
++    char *ours = NULL, *theirs = NULL;
++    long ours_size, theirs_size;
++
++    if (!exe_unix_name || !bundle || !(slash = strrchr( exe_unix_name, '/' ))) return;
++    if ((size_t)(slash - exe_unix_name) >= sizeof(dir)) return;
++    memcpy( dir, exe_unix_name, slash - exe_unix_name );
++    dir[slash - exe_unix_name] = 0;
++
++    snprintf( orig_dll, sizeof(orig_dll), "%s/lua51.dll.madeira-orig", dir );
++    if (access( orig_dll, F_OK )) return;
++    snprintf( game_dll, sizeof(game_dll), "%s/lua51.dll", dir );
++    snprintf( ours_path, sizeof(ours_path), "%s/compat/love/lua51.dll", bundle );
++
++    if ((ours_size = ios_read_whole_file( ours_path, &ours )) >= 0 &&
++        (theirs_size = ios_read_whole_file( game_dll, &theirs )) == ours_size &&
++        !memcmp( ours, theirs, ours_size ))
++    {
++        if (rename( orig_dll, game_dll ))
++            ERR( "[luajit-compat] could not restore %s: %s\n", game_dll, strerror( errno ) );
++        else
++            ERR( "[luajit-compat] %s: restored the game's own lua51.dll\n", dir );
++    }
++    free( ours );
++    free( theirs );
++}
++
+ /* Is the file name of `image` (any directory) `name`, a lower-case ASCII name? */
+ static int ios_image_name_is( const WCHAR *image, int image_len, const char *name )
+ {
+@@ -1749,6 +1805,9 @@
+         }
+         goto done;
+     }
++#ifdef WINE_IOS
++    if (pe_info.machine == IMAGE_FILE_MACHINE_AMD64) ios_luajit_swap_restore( unix_name );
++#endif
+     if (!machine)
+     {
+         /* Owner-aware (X3): the SPAWNER's identity decides hybrid-image
+diff -ruN a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -4777,14 +4777,16 @@
+ #define X18_ROLE_RN   1  /* bits[9:5] = base register for loads/stores/data-proc */
+ #define X18_ROLE_RM   2  /* bits[20:16] = second register (MOV, register offset) */
+ #define X18_ROLE_RT2  3  /* bits[14:10] = second register in LDP/STP */
++#define X18_ROLE_RT   4  /* bits[4:0] = the register being STORED (64-bit STR/STUR/STP) */
+ 
+-static int ios_insn_x18_role(uint32_t insn)
++static int ios_insn_x18_role(uint32_t insn, int stores)
+ {
+     /* Quick reject: check if 18 appears in any relevant field */
+     int rn = (insn >> 5) & 0x1f;
+     int rm = (insn >> 16) & 0x1f;
+     int rt2 = (insn >> 10) & 0x1f;
+-    if (rn != 18 && rm != 18 && rt2 != 18) return X18_ROLE_NONE;
++    int rt = insn & 0x1f;
++    if (rn != 18 && rm != 18 && rt2 != 18 && !(stores && rt == 18)) return X18_ROLE_NONE;
+ 
+     /* Classify instruction to verify the field is actually a register */
+     uint32_t top8 = insn >> 24;
+@@ -4847,9 +4849,58 @@
+         if (rm == 18) return X18_ROLE_RM;
+     }
+ 
++    /* x18 as the VALUE stored: `str x18, [sp, #n]` / `stp x18, xM, [sp, #n]`.
++     * This is NtCurrentTeb() written into a struct -- Wine's opengl32 thunks do
++     * it in nearly every function (`.teb = NtCurrentTeb()` in each params
++     * struct: 3,102 sites), and on iOS it stored a zeroed x18, so every GL call
++     * reached the unix side with teb == NULL. Only the plain 64-bit store forms
++     * are recognised: STR (unsigned offset), STUR, STP (signed offset). Loads
++     * INTO x18 are never patched. Only for images where ios_x18_patch_stores()
++     * is true (opengl32); every other image is patched exactly as before. */
++    if (stores && rt == 18 && rn != 18)
++    {
++        if ((insn & 0xFFC00000) == 0xF9000000) return X18_ROLE_RT;                /* STR  Xt, [Xn, #imm12*8] */
++        if ((insn & 0xFFE00C00) == 0xF8000000) return X18_ROLE_RT;                /* STUR Xt, [Xn, #simm9] */
++        if ((insn & 0xFFC00000) == 0xA9000000 && rt2 != 18) return X18_ROLE_RT;   /* STP  Xt, Xt2, [Xn, #simm7*8] */
++    }
++
+     return X18_ROLE_NONE;
+ }
+ 
++/* The trampoline pushes its scratch register (`str xS, [sp, #-16]!`) before
++ * running the rewritten instruction, so an SP-based X18_ROLE_RT store must
++ * address 16 bytes further up. Returns FALSE when the adjusted offset does not
++ * encode (the site is then left unpatched). */
++static BOOL ios_insn_x18_store_sp_fixup( uint32_t *insn )
++{
++    uint32_t v = *insn;
++    int64_t imm;
++
++    if (((v >> 5) & 0x1f) != 31) return TRUE;                  /* base is not SP */
++    if ((v & 0xFFC00000) == 0xF9000000)                        /* STR: imm12, scaled by 8 */
++    {
++        imm = ((v >> 10) & 0xfff) + 2;
++        if (imm > 0xfff) return FALSE;
++        *insn = (v & ~(0xfffu << 10)) | ((uint32_t)imm << 10);
++        return TRUE;
++    }
++    if ((v & 0xFFE00C00) == 0xF8000000)                        /* STUR: signed imm9, bytes */
++    {
++        imm = ((int64_t)((int32_t)(v << 11) >> 23)) + 16;
++        if (imm > 255) return FALSE;
++        *insn = (v & ~(0x1ffu << 12)) | (((uint32_t)imm & 0x1ff) << 12);
++        return TRUE;
++    }
++    if ((v & 0xFFC00000) == 0xA9000000)                        /* STP: signed imm7, scaled by 8 */
++    {
++        imm = ((int64_t)((int32_t)(v << 10) >> 25)) + 2;
++        if (imm > 63) return FALSE;
++        *insn = (v & ~(0x7fu << 15)) | (((uint32_t)imm & 0x7f) << 15);
++        return TRUE;
++    }
++    return FALSE;
++}
++
+ /* Replace x18 in an instruction with a different register */
+ static uint32_t ios_insn_replace_x18(uint32_t insn, int role, int scratch)
+ {
+@@ -4858,6 +4909,7 @@
+     case X18_ROLE_RN:  return (insn & ~(0x1f << 5)) | (scratch << 5);
+     case X18_ROLE_RM:  return (insn & ~(0x1f << 16)) | (scratch << 16);
+     case X18_ROLE_RT2: return (insn & ~(0x1f << 10)) | (scratch << 10);
++    case X18_ROLE_RT:  return (insn & ~0x1fu) | scratch;
+     default:           return insn;
+     }
+ }
+@@ -4909,15 +4961,25 @@
+  * 2.2MB reservation for ntdll) — with per-child copies of every DLL that
+  * waste was ~HALF the pool (4 apps hit 368/384MB). Count the actual
+  * patch sites and size the reservation to fit. */
+-size_t ios_jit_x18_tramp_need( const char *text, size_t text_size )
++/* Madeira: which images also get their x18 STORES patched (X18_ROLE_RT).
++ * Only opengl32, whose generated thunks store NtCurrentTeb() into every
++ * params struct. Another generated-thunk DLL that passes the TEB the same way
++ * would need adding here. `image` is the readable mapped PE. */
++int ios_x18_patch_stores( const void *image, size_t image_size )
+ {
++    extern const char *ios_pe_module_name( const void *image_base, size_t image_size );
++    return !strcasecmp( ios_pe_module_name( image, image_size ), "opengl32.dll" );
++}
++
++size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores )
++{
+     unsigned char *data_map = ios_x18_build_data_map( text, text_size );
+     size_t need = 0;
+     for (size_t i = 0; i < text_size; i += 4)
+     {
+         uint32_t insn = *(const uint32_t *)(text + i);
+         if (data_map && (data_map[(i / 4) >> 3] & (1 << ((i / 4) & 7)))) continue;
+-        if (ios_insn_x18_role( insn ) != X18_ROLE_NONE) need += 32;
++        if (ios_insn_x18_role( insn, stores ) != X18_ROLE_NONE) need += 32;
+     }
+     free( data_map );
+     /* Slack: the patcher's per-site max is 32B; pad one page so a
+@@ -4927,7 +4989,7 @@
+ }
+ 
+ int ios_jit_patch_x18(char *text_rw, char *text_rx, size_t text_size,
+-                       char *tramp_rw, char *tramp_rx, size_t tramp_size)
++                       char *tramp_rw, char *tramp_rx, size_t tramp_size, int stores)
+ {
+     size_t tramp_off = 0;
+     int count = 0;
+@@ -5083,10 +5145,10 @@
+         int role;
+         if (data_map && (data_map[(i / 4) >> 3] & (1 << ((i / 4) & 7))))
+         {
+-            if (ios_insn_x18_role(insn) != X18_ROLE_NONE) lit_skipped++;
++            if (ios_insn_x18_role(insn, stores) != X18_ROLE_NONE) lit_skipped++;
+             continue;
+         }
+-        role = ios_insn_x18_role(insn);
++        role = ios_insn_x18_role(insn, stores);
+         if (role == X18_ROLE_NONE) continue;
+ 
+         /* Determine scratch register — use x17 normally.
+@@ -5095,13 +5157,21 @@
+         int rt = insn & 0x1f;
+         int rn = (insn >> 5) & 0x1f;
+         int rm = (insn >> 16) & 0x1f;
+-        if (rt == 17 || rn == 17 || rm == 17) scratch = 16;
++        int rt2 = (role == X18_ROLE_RT) ? (insn >> 10) & 0x1f : -1;   /* STP's second register */
++        uint32_t replaced;
++        if (rt == 17 || rn == 17 || rm == 17 || rt2 == 17) scratch = 16;
+         /* Double-check: if both x16 and x17 are used, skip (extremely rare) */
+-        if (scratch == 16 && (rt == 16 || rn == 16 || rm == 16))
++        if (scratch == 16 && (rt == 16 || rn == 16 || rm == 16 || rt2 == 16))
+         {
+             skipped++;
+             continue;
+         }
++        replaced = ios_insn_replace_x18(insn, role, scratch);
++        if (role == X18_ROLE_RT && !ios_insn_x18_store_sp_fixup( &replaced ))
++        {
++            skipped++;
++            continue;
++        }
+ 
+         /* Check trampoline space (max 6 instructions = 24 bytes per trampoline) */
+         if (tramp_off + 24 > tramp_size)
+@@ -5160,7 +5230,7 @@
+             *(uint32_t *)(tramp_rw + tramp_off) = 0xF9400000 | ((slot_off / 8) << 10) | (scratch << 5) | scratch;
+             tramp_off += 4;
+             /* Modified instruction with x18 replaced by scratch */
+-            *(uint32_t *)(tramp_rw + tramp_off) = ios_insn_replace_x18(insn, role, scratch);
++            *(uint32_t *)(tramp_rw + tramp_off) = replaced;
+             tramp_off += 4;
+             /* ldr xSCRATCH, [sp], #16 */
+             *(uint32_t *)(tramp_rw + tramp_off) = (scratch == 17) ? 0xF84107F1 : 0xF84107F0;
+@@ -5262,6 +5332,10 @@
+      * entirely (see mmap_add_reserved_area) so an adjacent range can never
+      * silently coalesce the type away. */
+     unsigned int fex_only;
++    /* Madeira: THIN_ONLY. An arena for thin reservations (see ios_thin_reserve):
++     * only heads placed by ios_thin_reserve may map here. Same exclusions as
++     * fex_only, and generic placement never searches it. */
++    unsigned int thin_only;
+ };
+ 
+ static struct list reserved_areas = LIST_INIT(reserved_areas);
+@@ -6626,7 +6700,7 @@
+          * enough for the merge below to swallow it, and the type would vanish
+          * with no diagnostic -- after which generic placement could allocate
+          * inside the arena. Skipping keeps the insert position correct. */
+-        if (area->fex_only) continue;
++        if (area->fex_only || area->thin_only) continue;
+         if (area_end < addr) continue;
+         if (area->base > addr)
+         {
+@@ -6659,6 +6733,7 @@
+         area->base = addr;
+         area->size = size;
+         area->fex_only = 0;
++        area->thin_only = 0;
+         list_add_before( ptr, &area->entry );
+     }
+ }
+@@ -6700,6 +6775,7 @@
+     area->base = addr;
+     area->size = size;
+     area->fex_only = 1;
++    area->thin_only = 0;
+     list_add_before( ptr, &area->entry );
+     ERR( "[fex-arena] ml799 registered FEX_ONLY reserved area %p..%p (%llu MB) -- generic "
+          "placement cannot allocate here\n", addr, (char *)addr + size,
+@@ -6757,6 +6833,7 @@
+                          * of a FEX_ONLY area is still FEX_ONLY; defaulting it to
+                          * generic would quietly open the arena to everything. */
+                         new_area->fex_only = area->fex_only;
++                        new_area->thin_only = area->thin_only;
+                         list_add_after( ptr, &new_area->entry );
+                     }
+                     area->size = (char *)addr - (char *)area->base;
+@@ -8043,6 +8120,7 @@
+  * when a 32-bit process starts, never ahead of time.  0 on a large map.
+  */
+ static unsigned ios_wow_small_va_slots;
++extern unsigned long long ios_layerkit_lo, ios_layerkit_hi;   /* ml900: measured in ios_va_profile() */
+ static void ios_wow_band( ULONG_PTR *floor, ULONG_PTR *ceil )
+ {
+     static int announced;
+@@ -8068,6 +8146,36 @@
+             *floor = lo;
+             *ceil  = hi;
+         }
++        else
++        {
++            /* A SMALLER MAP STILL. A tablet reported max_address = 0x458000000
++             * (17.4 GB): top - 8 GB is below 16 GB, the band above was empty, the
++             * candidates stayed in the unreachable high band and a 32-bit main
++             * image was terminated with c0000017. Its launch probe showed the
++             * 4 GB slots at 4, 8 and 12 GB free; 4 GB holds the JIT pool and the
++             * executable window, and CoreAnimation's measured range
++             * (ios_layerkit_lo/hi, [layerkit-range]) took 12 GB up. So on such a
++             * map the band starts at 8 GB, runs to the end of the map, and is cut
++             * at the CoreAnimation range -- keeping whichever side can hold a
++             * window. The guard page may borrow the first page of that range. */
++            ULONG_PTR slo = (ULONG_PTR)0x200000000ULL;                  /* 8 GB */
++            ULONG_PTR shi = kern_max;
++
++            if (ios_layerkit_hi && ios_layerkit_lo < shi && ios_layerkit_hi > slo)
++            {
++                ULONG_PTR below_hi = ios_layerkit_lo > slo ? ios_layerkit_lo : slo;
++                ULONG_PTR above_lo = ((ULONG_PTR)ios_layerkit_hi + IOS_WOW_WINDOW_SIZE - 1) &
++                                     ~(IOS_WOW_WINDOW_SIZE - 1);
++
++                if (below_hi >= slo + IOS_WOW_WINDOW_SIZE) shi = below_hi;
++                else slo = above_lo;
++            }
++            if (shi >= slo + IOS_WOW_WINDOW_SIZE)
++            {
++                *floor = slo;
++                *ceil  = shi;
++            }
++        }
+         if (!announced)
+         {
+             announced = 1;
+@@ -8077,6 +8185,32 @@
+                      ios_wow_small_va_slots );
+         }
+     }
++    else if (kern_max > 1)
++    {
++        /* A map that ends just past the floor. Without the increased-memory-limit
++         * entitlement a phone reported max_address = 0x7180000000 (454 GB) with
++         * everything between ~6 GB and 0x7000000000 refused (kr=3): the first
++         * slot above the floor, 0x7100000000, runs past the end, so no 32-bit
++         * program could start. The floor sits above 0x7000000000 because the
++         * JIT pool's RW alias usually lives there; when the pool went elsewhere
++         * the launch probe found that slot free. Offer it: ios_wow_window_try
++         * maps it fixed, so an occupied slot is still rejected. */
++        ULONG_PTR first = (*floor + IOS_WOW_WINDOW_SIZE - 1) & ~(IOS_WOW_WINDOW_SIZE - 1);
++        ULONG_PTR below = *floor & ~(IOS_WOW_WINDOW_SIZE - 1);
++
++        if (first + IOS_WOW_WINDOW_SIZE > kern_max && below + IOS_WOW_WINDOW_SIZE <= kern_max &&
++            below + IOS_WOW_WINDOW_SIZE <= *ceil)
++        {
++            *floor = below;
++            if (!announced)
++            {
++                announced = 1;
++                dprintf( 2, "[wow-window] SHORT MAP: the map ends at %p, no slot fits above the floor "
++                            "-- trying [%p,%p) (free only when the JIT pool is elsewhere)\n",
++                         (void *)kern_max, (void *)*floor, (void *)*ceil );
++            }
++        }
++    }
+ }
+ 
+ /* Free VA in [4 GB, map_end): the sum of the holes between regions. */
+@@ -9169,6 +9303,11 @@
+  * STATUS_NOT_IMPLEMENTED. */
+ extern const void *winegstreamer_unix_call_funcs[];
+ 
++/* opengl32's unix side, compiled from wine/dlls/opengl32/unix_{wgl,thunks}.c
++ * into libntdll_unix.a (build/ntdll-unix/build.sh). */
++extern const void *opengl32_unix_call_funcs[];
++extern const void *opengl32_unix_call_wow64_funcs[];
++
+ /* win32u's unix init, statically linked via libwin32u_unix.a. Renamed
+  * from __wine_unix_lib_init in build/win32u-unix/build.sh so future
+  * statically-linked unix libs can keep their own init without colliding.
+@@ -9517,11 +9656,22 @@
+             libname = "win32u (stub table)";
+             funcs64 = funcs_wow64 = (const void *)ios_stub_unix_call_table;
+         } else if (match && strstr(match, "opengl32")) {
++            /* Real opengl32 unix side (OpenGL ES / desktop GL through the winios
++             * WGL driver). MADEIRA_NO_GL=1 keeps the old GL-absent stub table.
++             * The wow64 table's thunks convert every embedded guest pointer with
++             * ios_wow_host_ptr() (patches/wine-opengl-winios.patch: make_opengl),
++             * so 32-bit GL games (Quake 3 engine, GLQuake) reach the driver. */
+             pthread_once( &ios_stub_tables_once, ios_init_stub_tables );
+-            WARN_(module)("iOS: module %p (%s) -> GL-absent stub table (attach ok, wgl/gl NOT_SUPPORTED)\n",
+-                          module, match);
+-            libname = "opengl32 (GL-absent stub table)";
+-            funcs64 = funcs_wow64 = (const void *)ios_gl_stub_unix_call_table;
++            if (getenv("MADEIRA_NO_GL")) {
++                WARN_(module)("iOS: module %p (%s) -> GL-absent stub table (MADEIRA_NO_GL)\n",
++                              module, match);
++                libname = "opengl32 (GL-absent stub table, MADEIRA_NO_GL)";
++                funcs64 = funcs_wow64 = (const void *)ios_gl_stub_unix_call_table;
++            } else {
++                libname = "opengl32 (winios WGL)";
++                funcs64 = (const void *)opengl32_unix_call_funcs;
++                funcs_wow64 = (const void *)opengl32_unix_call_wow64_funcs;
++            }
+         } else {
+             pthread_once( &ios_stub_tables_once, ios_init_stub_tables );
+             WARN_(module)("iOS: no unix .so for module %p (unix_path=%s, modname=%s, mapped=%s), using stub table\n",
+@@ -11643,7 +11793,8 @@
+  * the patch stage; scanning x64 bytes would count garbage matches). */
+ static size_t ios_x18_tramp_prealloc_scan( const char *image, size_t image_size )
+ {
+-    extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size );
++    extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores );
++    extern int ios_x18_patch_stores( const void *image, size_t image_size );
+     const size_t pg = 0x4000;
+     unsigned int pe_off;
+     unsigned short machine, num_sec, opt_sz;
+@@ -11672,7 +11823,7 @@
+     }
+     if (machine != IMAGE_FILE_MACHINE_ARM64 && !is_arm64ec) return 0;
+     if (!text_sz || text_off + text_sz > image_size) return 0;
+-    return (ios_jit_x18_tramp_need(image + text_off, text_sz) + pg - 1) & ~(pg - 1);
++    return (ios_jit_x18_tramp_need(image + text_off, text_sz, ios_x18_patch_stores(image, image_size)) + pg - 1) & ~(pg - 1);
+ }
+ 
+ 
+@@ -13781,8 +13932,10 @@
+                     if (text_sz > 0)
+                     {
+                         /* Task #25: exact budget (was 100% of .text, ~99% wasted). */
+-                        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size );
+-                        size_t tramp_budget = ios_jit_x18_tramp_need((char *)jit_rw_base + offset + text_off, text_sz);
++                        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores );
++                        extern int ios_x18_patch_stores( const void *image, size_t image_size );
++                        int x18_stores = ios_x18_patch_stores(image_base, image_size);
++                        size_t tramp_budget = ios_jit_x18_tramp_need((char *)jit_rw_base + offset + text_off, text_sz, x18_stores);
+                         size_t tramp_alloc = (tramp_budget + page_size - 1) & ~(page_size - 1);
+                         /* task #34: fixed image-relative offset — the region
+                          * pre-reserved in this image's own allocation. The
+@@ -13808,7 +13961,7 @@
+                             char *text_rx = (char *)jit_rx_base + offset + text_off;
+ 
+                             int patched = ios_jit_patch_x18(text_rw, text_rx, text_sz,
+-                                                            tramp_rw, tramp_rx, tramp_alloc);
++                                                            tramp_rw, tramp_rx, tramp_alloc, x18_stores);
+ 
+                             if (patched > 0)
+                             {
+@@ -14043,9 +14196,11 @@
+      * mprotect_exec copy pipeline). Budget from the SOURCE bytes; identical
+      * to what the post-memcpy scan would compute. */
+     {
+-        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size );
++        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores );
++        extern int ios_x18_patch_stores( const void *image, size_t image_size );
+         child_tramp_prealloc = m->text_size
+-            ? ((ios_jit_x18_tramp_need((const char *)m->pe_base + m->text_offset, m->text_size) + pg - 1) & ~(pg - 1))
++            ? ((ios_jit_x18_tramp_need((const char *)m->pe_base + m->text_offset, m->text_size,
++                                       ios_x18_patch_stores(m->pe_base, m->size)) + pg - 1) & ~(pg - 1))
+             : 0;
+     }
+     alloc_size += child_tramp_prealloc;
+@@ -14175,7 +14330,8 @@
+         int patched = ios_jit_patch_x18(
+             rw_dest + m->text_offset, rx_dest + m->text_offset, m->text_size,
+             (char *)ios_jit_rw_base_global + tramp_off,
+-            (char *)ios_jit_rx_base_global + tramp_off, child_tramp_prealloc);
++            (char *)ios_jit_rx_base_global + tramp_off, child_tramp_prealloc,
++            ios_x18_patch_stores(m->pe_base, m->size));
+         sys_icache_invalidate((char *)ios_jit_rx_base_global + tramp_off, child_tramp_prealloc);
+         dprintf(2, "[child-ntdll] x18-patched %d instructions (tramps at image-relative +0x%lx)\n",
+                 patched, (unsigned long)(alloc_size - child_tramp_prealloc));
+@@ -14722,6 +14878,7 @@
+ 
+             /* ml799: the FEX arena serves only requests contained in it. */
+             if (area->fex_only && !fex_arena_covers( limit_low, limit_high )) continue;
++            if (area->thin_only) continue;   /* Madeira: thin heads are placed at fixed slots */
+             if (start >= limit_high) continue;
+             if (end <= limit_low) return NULL;
+             if (start < limit_low) start = (void *)ROUND_SIZE( 0, limit_low, host_page_mask );
+@@ -14739,6 +14896,7 @@
+ 
+             /* ml799: the FEX arena serves only requests contained in it. */
+             if (area->fex_only && !fex_arena_covers( limit_low, limit_high )) continue;
++            if (area->thin_only) continue;   /* Madeira: thin heads are placed at fixed slots */
+             if (start >= limit_high) return NULL;
+             if (end <= limit_low) continue;
+             if (start < limit_low) start = (void *)ROUND_SIZE( 0, limit_low, host_page_mask );
+@@ -14757,6 +14915,12 @@
+  * Map a memory area at a fixed address.
+  * virtual_mutex must be held by caller.
+  */
++#ifdef WINE_IOS
++/* Madeira: set by ios_thin_reserve, with virtual_mutex held, while it maps a
++ * head inside a thin arena. */
++static int ios_thin_placing;
++#endif
++
+ static NTSTATUS map_fixed_area( void *base, size_t size, int unix_prot )
+ {
+     struct reserved_area *area;
+@@ -14765,6 +14929,20 @@
+ 
+     if ((UINT_PTR)base & host_page_mask) return STATUS_CONFLICTING_ADDRESSES;
+     if (find_view_range( base, size )) return STATUS_CONFLICTING_ADDRESSES;
++#ifdef WINE_IOS
++    /* Madeira: every address in a thin arena lies inside some thin reservation's
++     * range (or the arena's margin), so a fixed map there conflicts, as it would
++     * on Windows. Only ios_thin_reserve places heads in it. */
++    if (!ios_thin_placing)
++    {
++        LIST_FOR_EACH_ENTRY( area, &reserved_areas, struct reserved_area, entry )
++        {
++            if (area->base >= (void *)end) break;
++            if (area->thin_only && (char *)area->base + area->size > start)
++                return STATUS_CONFLICTING_ADDRESSES;
++        }
++    }
++#endif
+ 
+     LIST_FOR_EACH_ENTRY( area, &reserved_areas, struct reserved_area, entry )
+     {
+@@ -18408,7 +18586,7 @@
+          * must not widen address_space_limit to the arena's top: that number
+          * feeds placement decisions elsewhere, and stretching it to cover a
+          * range nothing generic may use would misreport the usable space. */
+-        if (area->fex_only) continue;
++        if (area->fex_only || area->thin_only) continue;
+         if (is_beyond_limit( base, area->size, address_space_limit ))
+             address_space_limit = host_addr_space_limit = end;
+         if (is_win64 && base < (void *)0x80000000) break;
+@@ -20882,7 +21060,7 @@
+              * lifetime, and the 0x80000000..address_space_limit call below
+              * spans it -- releasing it here would hand the emulator's address
+              * space back to general use mid-run, silently. */
+-            if (area->fex_only) continue;
++            if (area->fex_only || area->thin_only) continue;
+             if (area_end <= base) continue;
+             if (area_base >= limit) return;
+             if (area_base < base) area_base = base;
+@@ -20973,8 +21151,386 @@
+  *
+  * NtAllocateVirtualMemory[Ex] implementation.
+  */
++#ifdef WINE_IOS
+ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect,
+                                          ULONG_PTR limit_low, ULONG_PTR limit_high,
++                                         ULONG_PTR align, ULONG attributes );
++
++/* Madeira: THIN RESERVATIONS.
++ *
++ * Some programs reserve address space in 1 GB blocks (MEM_RESERVE, PAGE_READWRITE,
++ * no address) and commit only a few MB at the start of each. On Windows that is
++ * free. Here a device can map only ~64 GB, Wine and FEX already use part of it,
++ * and every reservation takes its full size: one game reached 42 x 1 GB with
++ * 6 MB committed, the 43rd failed with STATUS_NO_MEMORY, and it wrote through
++ * the NULL.
++ *
++ * Once ios_thin_after bytes of such reservations have been made normally, the
++ * next ones get only a real HEAD: a view of ios_thin_head bytes at a slot in a
++ * thin arena, a THIN_ONLY reserved area. The caller is told it got the full
++ * size. The rest of the range (the tail) overlaps the heads after it and the
++ * arena's margin, all of it held by the arena, so nothing outside the arena can
++ * be mapped there:
++ *
++ *   arena:  [head 0][g][head 1][g][head 2][g] ... [margin: IOS_THIN_MAX_SIZE]
++ *   range 0: |<------------------- reported size ------------------->|
++ *
++ * - A commit inside the head is an ordinary commit.
++ * - Each head is followed by a 1 MB guard (g) that no view covers. A range that
++ *   grows contiguously past its head must commit into the guard first, which
++ *   has no view, so the commit fails (STATUS_NOT_MAPPED_VIEW, as for any commit
++ *   outside a view) instead of reaching the next head. That failure is logged
++ *   as [thin] OVERFLOW.
++ * - Only a commit that jumps past the guard straight into a later head can land
++ *   in another reservation's memory; nothing can tell the two apart there.
++ *   Raise MADEIRA_THIN_RESERVE_MB if a program does that.
++ * - MEM_DECOMMIT past the head is clamped to the head (the tail holds nothing),
++ *   and MEM_RELEASE of the base frees the head and its slot.
++ * - NtQueryVirtualMemory reports a tail as MEM_RESERVE of the reservation.
++ *
++ * Environment (madeira-env.txt): MADEIRA_THIN_RESERVE=1 turns this ON (Porthole: off by default);
++ * MADEIRA_THIN_RESERVE_MB sets the slot stride (default 64, 16-512);
++ * MADEIRA_THIN_RESERVE_AFTER_GB sets how much is reserved normally first
++ * (default 8). */
++#define IOS_THIN_ARENAS   4
++#define IOS_THIN_SLOTS    256
++#define IOS_THIN_MAX      (IOS_THIN_ARENAS * IOS_THIN_SLOTS)
++#define IOS_THIN_MIN_SIZE 0x40000000ULL    /* 1 GB */
++#define IOS_THIN_MAX_SIZE 0x80000000ULL    /* 2 GB, also each arena's margin */
++#define IOS_THIN_HEADS    0x100000000ULL   /* head slots per arena, at most */
++#define IOS_THIN_GUARD    0x100000ULL      /* 1 MB */
++
++struct ios_thin_arena
++{
++    ULONG_PTR     base;
++    unsigned      nslots;
++    unsigned char used[IOS_THIN_SLOTS];
++};
++
++struct ios_thin_res
++{
++    ULONG_PTR      base;      /* head base = reservation base */
++    ULONG_PTR      size;      /* size the caller was given */
++    ULONG_PTR      hw;        /* highest committed offset seen, for the log */
++    ULONG          protect;
++    unsigned short arena, slot;
++    unsigned char  live, marks;
++};
++
++static struct ios_thin_arena ios_thin_arenas[IOS_THIN_ARENAS];
++static unsigned ios_thin_arena_n;
++static struct ios_thin_res ios_thin[IOS_THIN_MAX];
++static unsigned ios_thin_n;          /* entries in use, live or not */
++static unsigned ios_thin_live_n;     /* 0 = every thin hook is a no-op */
++static unsigned ios_thin_grants;
++static int ios_thin_mode = -1;       /* -1 unread, 0 off, 1 on */
++static ULONG_PTR ios_thin_stride, ios_thin_head, ios_thin_after, ios_thin_seen;
++
++static int ios_thin_config(void)
++{
++    const char *e;
++    unsigned long mb, gb;
++
++    if (ios_thin_mode >= 0) return ios_thin_mode;
++    e = getenv( "MADEIRA_THIN_RESERVE" );
++    /* Porthole: opt-in (MADEIRA_THIN_RESERVE=1). The fork this came from has it on by default; here it stays off so it cannot change the memory behaviour of other games. */
++    ios_thin_mode = (e && e[0] == '1');
++    mb = (e = getenv( "MADEIRA_THIN_RESERVE_MB" )) ? strtoul( e, NULL, 10 ) : 64;
++    if (mb < 16) mb = 16;
++    if (mb > 512) mb = 512;
++    gb = (e = getenv( "MADEIRA_THIN_RESERVE_AFTER_GB" )) ? strtoul( e, NULL, 10 ) : 8;
++    ios_thin_stride = (ULONG_PTR)mb << 20;
++    ios_thin_head   = ios_thin_stride - IOS_THIN_GUARD;
++    ios_thin_after  = (ULONG_PTR)gb << 30;
++    dprintf( 2, "[thin] %s: 1-2 GB read-write reserves get a %lu MB head once %lu GB of them "
++                "were reserved normally\n", ios_thin_mode ? "on" : "off (MADEIRA_THIN_RESERVE=1 turns it on)",
++             (unsigned long)(ios_thin_head >> 20), gb );
++    return ios_thin_mode;
++}
++
++/* Like mmap_add_fex_reserved_area: never merged, and an overlap is refused. */
++static int mmap_add_thin_reserved_area( void *addr, SIZE_T size )
++{
++    struct reserved_area *area;
++    struct list *ptr;
++
++    LIST_FOR_EACH( ptr, &reserved_areas )
++    {
++        area = LIST_ENTRY( ptr, struct reserved_area, entry );
++        if (area->base > addr) break;
++        if ((char *)area->base + area->size > (char *)addr) return 0;
++    }
++    if (!(area = malloc( sizeof(*area) ))) return 0;
++    area->base = addr;
++    area->size = size;
++    area->fex_only = 0;
++    area->thin_only = 1;
++    list_add_before( ptr, &area->entry );
++    return 1;
++}
++
++/* virtual_mutex held. Halves the head span until the kernel finds room. */
++static int ios_thin_new_arena(void)
++{
++    ULONG_PTR heads;
++
++    if (ios_thin_arena_n >= IOS_THIN_ARENAS) return 0;
++    for (heads = IOS_THIN_HEADS; heads >= IOS_THIN_HEADS / 4; heads /= 2)
++    {
++        ULONG_PTR span = heads + IOS_THIN_MAX_SIZE, total = span + granularity_mask + 1;
++        ULONG_PTR p, base;
++        struct ios_thin_arena *ar;
++        unsigned n = heads / ios_thin_stride;
++
++        if (n > IOS_THIN_SLOTS) n = IOS_THIN_SLOTS;
++        if ((p = (ULONG_PTR)anon_mmap_alloc( total, PROT_NONE )) == (ULONG_PTR)MAP_FAILED) continue;
++        base = (p + granularity_mask) & ~(ULONG_PTR)granularity_mask;
++        if (base > p) munmap( (void *)p, base - p );
++        if (p + total > base + span) munmap( (void *)(base + span), p + total - (base + span) );
++        if (is_beyond_limit( (void *)base, span, user_space_limit ) ||
++            !mmap_add_thin_reserved_area( (void *)base, span ))
++        {
++            munmap( (void *)base, span );
++            continue;
++        }
++        ar = &ios_thin_arenas[ios_thin_arena_n++];
++        ar->base = base;
++        ar->nslots = n;
++        memset( ar->used, 0, sizeof(ar->used) );
++        dprintf( 2, "[thin] arena #%u [%p,%p): %u heads of %lu MB, %lu MB margin\n",
++                 ios_thin_arena_n - 1, (void *)base, (void *)(base + span), n,
++                 (unsigned long)(ios_thin_head >> 20), (unsigned long)(IOS_THIN_MAX_SIZE >> 20) );
++        return 1;
++    }
++    dprintf( 2, "[thin] no room for another arena (%u in use): reserving normally\n", ios_thin_arena_n );
++    return 0;
++}
++
++/* Called before the normal placement of every unhinted MEM_RESERVE. TRUE: done,
++ * *status says how. */
++static BOOL ios_thin_reserve( void **ret, SIZE_T *size_ptr, ULONG protect, NTSTATUS *status )
++{
++    SIZE_T size = ROUND_SIZE( 0, *size_ptr, granularity_mask );
++    sigset_t sigset;
++    unsigned a, s, r, pass;
++    BOOL done = FALSE;
++
++    if (protect != PAGE_READWRITE || size < IOS_THIN_MIN_SIZE || size > IOS_THIN_MAX_SIZE) return FALSE;
++    if (!ios_thin_config()) return FALSE;
++
++    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++    if (ios_thin_seen < ios_thin_after)
++    {
++        ios_thin_seen += size;
++        goto out;
++    }
++    for (r = 0; r < ios_thin_n; r++) if (!ios_thin[r].live) break;
++    if (r == IOS_THIN_MAX) goto out;
++
++    for (pass = 0; pass < 2 && !done; pass++)
++    {
++        if (pass && !ios_thin_new_arena()) break;
++        for (a = pass ? ios_thin_arena_n - 1 : 0; a < ios_thin_arena_n && !done; a++)
++        {
++            struct ios_thin_arena *ar = &ios_thin_arenas[a];
++
++            for (s = 0; s < ar->nslots && !done; s++)
++            {
++                void *head = (void *)(ar->base + (ULONG_PTR)s * ios_thin_stride);
++                SIZE_T hs = ios_thin_head;
++                NTSTATUS st;
++
++                if (ar->used[s]) continue;
++                ios_thin_placing = 1;
++                st = allocate_virtual_memory( &head, &hs, MEM_RESERVE, protect, 0, 0, 0, 0 );
++                ios_thin_placing = 0;
++                if (st)
++                {
++                    /* nothing else maps here, so this is unexpected: retire the slot */
++                    dprintf( 2, "[thin] head at %p failed (%08x); slot retired\n", head, (unsigned)st );
++                    ar->used[s] = 2;
++                    continue;
++                }
++                ar->used[s] = 1;
++                ios_thin[r].base = (ULONG_PTR)head;
++                ios_thin[r].size = size;
++                ios_thin[r].hw = 0;
++                ios_thin[r].protect = protect;
++                ios_thin[r].arena = a;
++                ios_thin[r].slot = s;
++                ios_thin[r].marks = 0;
++                ios_thin[r].live = 1;
++                if (r == ios_thin_n) ios_thin_n++;
++                ios_thin_live_n++;
++                *ret = head;
++                *size_ptr = size;
++                *status = STATUS_SUCCESS;
++                done = TRUE;
++                if (++ios_thin_grants <= 64 || !(ios_thin_grants % 64))
++                    dprintf( 2, "[thin] #%u %p: %lu MB reserved, %lu MB head (arena %u slot %u, %u live)\n",
++                             ios_thin_grants, head, (unsigned long)(size >> 20),
++                             (unsigned long)(ios_thin_head >> 20), a, s, ios_thin_live_n );
++            }
++        }
++    }
++out:
++    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++    return done;
++}
++
++/* virtual_mutex held. The live entry whose head, or whose whole range, holds a.
++ * Ranges overlap; the one with the highest base at or below a is the one whose
++ * tail a is nearest the start of. */
++static int ios_thin_find( ULONG_PTR a, BOOL head_only )
++{
++    unsigned i;
++    int best = -1;
++
++    for (i = 0; i < ios_thin_n; i++)
++    {
++        const struct ios_thin_res *t = &ios_thin[i];
++
++        if (!t->live || a < t->base) continue;
++        if (a >= t->base + (head_only ? ios_thin_head : t->size)) continue;
++        if (best < 0 || t->base > ios_thin[best].base) best = i;
++    }
++    return best;
++}
++
++/* virtual_mutex held. Lowest live head base above a, or 0. */
++static ULONG_PTR ios_thin_next_base( ULONG_PTR a )
++{
++    unsigned i;
++    ULONG_PTR next = 0;
++
++    for (i = 0; i < ios_thin_n; i++)
++        if (ios_thin[i].live && ios_thin[i].base > a && (!next || ios_thin[i].base < next))
++            next = ios_thin[i].base;
++    return next;
++}
++
++/* Every commit at an explicit address while thin reservations are live: track
++ * how far each head is used, and name a commit that ran past one. The commit
++ * itself is left to the normal path, which fails it when no view covers it. */
++static void ios_thin_note_commit( void *addr, SIZE_T size )
++{
++    ULONG_PTR a = (ULONG_PTR)addr, end = a + size;
++    static unsigned overflow_logs;
++    sigset_t sigset;
++    int r;
++
++    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++    if ((r = ios_thin_find( a, TRUE )) >= 0)
++    {
++        struct ios_thin_res *t = &ios_thin[r];
++
++        if (end <= t->base + ios_thin_head)
++        {
++            ULONG_PTR used = end - t->base;
++            unsigned pct;
++
++            if (used > t->hw) t->hw = used;
++            pct = (unsigned)(t->hw * 100 / ios_thin_head);
++            if ((pct >= 25 && !(t->marks & 1)) || (pct >= 50 && !(t->marks & 2)) ||
++                (pct >= 75 && !(t->marks & 4)))
++            {
++                t->marks |= (pct >= 25 ? 1 : 0) | (pct >= 50 ? 2 : 0) | (pct >= 75 ? 4 : 0);
++                dprintf( 2, "[thin] %p: %u%% of its %lu MB head committed\n", (void *)t->base,
++                         pct, (unsigned long)(ios_thin_head >> 20) );
++            }
++        }
++        else if (overflow_logs++ < 64)
++            dprintf( 2, "[thin] OVERFLOW: commit %p+0x%lx runs past the %lu MB head of %p "
++                        "(highest commit so far +0x%lx); it fails. Raise MADEIRA_THIN_RESERVE_MB\n",
++                     addr, (unsigned long)size, (unsigned long)(ios_thin_head >> 20),
++                     (void *)t->base, (unsigned long)t->hw );
++    }
++    else if ((r = ios_thin_find( a, FALSE )) >= 0 && !find_view( addr, 0 ) && overflow_logs++ < 64)
++        dprintf( 2, "[thin] OVERFLOW: commit %p+0x%lx is %lu MB into %p, past its %lu MB head "
++                    "(highest commit so far +0x%lx); it fails. Raise MADEIRA_THIN_RESERVE_MB\n",
++                 addr, (unsigned long)size, (unsigned long)((a - ios_thin[r].base) >> 20),
++                 (void *)ios_thin[r].base, (unsigned long)(ios_thin_head >> 20),
++                 (unsigned long)ios_thin[r].hw );
++    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++}
++
++/* virtual_mutex held, MEM_DECOMMIT. Clamps a decommit that starts in a head
++ * and runs into its tail. TRUE: base is in a tail, where nothing is committed,
++ * so the decommit succeeds without doing anything. */
++static BOOL ios_thin_decommit_fixup( void *base, SIZE_T *size )
++{
++    struct file_view *view = find_view( base, 0 );
++    int r;
++
++    if (view)
++    {
++        ULONG_PTR vend = (ULONG_PTR)view->base + view->size;
++
++        if (*size && (ULONG_PTR)base + *size > vend && (r = ios_thin_find( (ULONG_PTR)base, TRUE )) >= 0 &&
++            ios_thin[r].base == (ULONG_PTR)view->base &&
++            (ULONG_PTR)base + *size <= ios_thin[r].base + ios_thin[r].size)
++            *size = vend - (ULONG_PTR)base;
++        return FALSE;
++    }
++    if ((r = ios_thin_find( (ULONG_PTR)base, FALSE )) < 0) return FALSE;
++    if (!*size) *size = ios_thin[r].base + ios_thin[r].size - (ULONG_PTR)base;
++    return TRUE;
++}
++
++/* virtual_mutex held, after a successful MEM_RELEASE at base. */
++static void ios_thin_released( void *base )
++{
++    unsigned i;
++
++    for (i = 0; i < ios_thin_n; i++)
++    {
++        struct ios_thin_res *t = &ios_thin[i];
++
++        if (!t->live || t->base != (ULONG_PTR)base || find_view( base, 0 )) continue;
++        ios_thin_arenas[t->arena].used[t->slot] = 0;
++        t->live = 0;
++        ios_thin_live_n--;
++        dprintf( 2, "[thin] %p released (highest commit +0x%lx, %u live)\n", base,
++                 (unsigned long)t->hw, ios_thin_live_n );
++        return;
++    }
++}
++
++/* After fill_basic_memory_info: report a thin tail as part of its reservation. */
++static void ios_thin_fix_query( const void *addr, MEMORY_BASIC_INFORMATION *info )
++{
++    ULONG_PTR a = (ULONG_PTR)addr & ~page_mask, end, next;
++    sigset_t sigset;
++    int r;
++
++    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++    if (info->State == MEM_FREE && (r = ios_thin_find( a, FALSE )) >= 0)
++    {
++        end = ios_thin[r].base + ios_thin[r].size;
++        if ((next = ios_thin_next_base( a )) && next < end) end = next;
++        info->BaseAddress       = (void *)a;
++        info->AllocationBase    = (void *)ios_thin[r].base;
++        info->AllocationProtect = ios_thin[r].protect;
++        info->RegionSize        = end - a;
++        info->State             = MEM_RESERVE;
++        info->Protect           = 0;
++        info->Type              = MEM_PRIVATE;
++    }
++    else if (info->State == MEM_RESERVE &&
++             (r = ios_thin_find( (ULONG_PTR)info->AllocationBase, TRUE )) >= 0 &&
++             ios_thin[r].base == (ULONG_PTR)info->AllocationBase &&
++             (ULONG_PTR)info->BaseAddress + info->RegionSize == ios_thin[r].base + ios_thin_head)
++    {
++        end = ios_thin[r].base + ios_thin[r].size;
++        if ((next = ios_thin_next_base( ios_thin[r].base )) && next < end) end = next;
++        info->RegionSize = end - (ULONG_PTR)info->BaseAddress;
++    }
++    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++}
++#endif /* WINE_IOS */
++
++static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect,
++                                         ULONG_PTR limit_low, ULONG_PTR limit_high,
+                                          ULONG_PTR align, ULONG attributes )
+ {
+     void *base;
+@@ -20992,6 +21548,16 @@
+      * below 4 GB is mappable on iOS, so it can never be a host constraint.
+      * A no-op for a process without a window. */
+     ios_wow_translate_limits( &limit_low, &limit_high );
++
++    /* Madeira: see ios_thin_reserve. */
++    if (!*ret && type == MEM_RESERVE && !limit_low && !limit_high && !align && !attributes)
++    {
++        NTSTATUS thin_status;
++
++        if (ios_thin_reserve( ret, size_ptr, protect, &thin_status )) return thin_status;
++    }
++    else if (*ret && (type & MEM_COMMIT) && !(type & MEM_RESERVE) && ios_thin_live_n)
++        ios_thin_note_commit( *ret, *size_ptr );
+ #endif
+ 
+     /* Round parameters to a page boundary */
+@@ -24316,6 +24882,17 @@
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+ 
++#ifdef WINE_IOS
++    /* Madeira: a thin reservation's tail holds nothing; see ios_thin_reserve. */
++    if (ios_thin_live_n && type == MEM_DECOMMIT && base && ios_thin_decommit_fixup( base, &size ))
++    {
++        *addr_ptr = base;
++        *size_ptr = size;
++        server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++        return STATUS_SUCCESS;
++    }
++#endif
++
+     /* avoid freeing the DOS area when a broken app passes a NULL pointer */
+     if (!base)
+     {
+@@ -24358,6 +24935,9 @@
+     {
+         *addr_ptr = base;
+         *size_ptr = size;
++#ifdef WINE_IOS
++        if ((type & MEM_RELEASE) && ios_thin_live_n) ios_thin_released( base );
++#endif
+     }
+ #ifdef WINE_IOS
+     else
+@@ -25175,6 +25755,9 @@
+     }
+ 
+     if ((status = fill_basic_memory_info( addr, info ))) return status;
++#ifdef WINE_IOS
++    if (ios_thin_live_n) ios_thin_fix_query( addr, info );
++#endif
+ 
+     if (res_len) *res_len = sizeof(*info);
+     return STATUS_SUCCESS;
+diff -ruN a/build/win32u-unix/build.sh b/build/win32u-unix/build.sh
+--- a/build/win32u-unix/build.sh
++++ b/build/win32u-unix/build.sh
+@@ -132,6 +132,10 @@
+     compile_one "$src" "$name"
+ done
+ 
++# winios OpenGL driver: WGL over Apple's OpenGL ES (EAGL half in
++# app/Madeira/Winios/WiniosGL.m).
++compile_one "$BUILD_DIR/opengl_ios.c" "opengl_ios"
++
+ echo ""
+ echo "Results: $SUCCEEDED succeeded, $FAILED failed"
+ if [ -n "$FAILED_FILES" ]; then
+diff -ruN a/build/win32u-unix/driver_ios.c b/build/win32u-unix/driver_ios.c
+--- a/build/win32u-unix/driver_ios.c
++++ b/build/win32u-unix/driver_ios.c
+@@ -60,6 +60,9 @@
+ extern void winios_pWindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
+                                       const struct window_rects *new_rects, struct window_surface *surface ) __attribute__((weak));
+ 
++extern UINT winios_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs,
++                               const struct opengl_driver_funcs **driver_funcs );
++
+ static struct user_driver_funcs winios_user_driver;
+ 
+ /* Direct mode (no virtual desktop) has no compositor to draw the Windows
+@@ -1910,6 +1913,9 @@
+                         "(MADEIRA_GAME_WINDOWS=0 hides them)\n" );
+         }
+         winios_user_driver.pUpdateDisplayDevices = winios_UpdateDisplayDevices;
++        /* OpenGL ES behind WGL (opengl_ios.c). MADEIRA_NO_GL=1 restores the
++         * GL-absent behaviour (every context creation fails). */
++        if (!getenv( "MADEIRA_NO_GL" )) winios_user_driver.pOpenGLInit = winios_OpenGLInit;
+         __wine_set_user_driver( &winios_user_driver, WINE_GDI_DRIVER_VERSION );
+ #else
+         __wine_set_user_driver( &null_user_driver, WINE_GDI_DRIVER_VERSION );
+diff -ruN a/build/win32u-unix/opengl_ios.c b/build/win32u-unix/opengl_ios.c
+--- a/build/win32u-unix/opengl_ios.c
++++ b/build/win32u-unix/opengl_ios.c
+@@ -0,0 +1,903 @@
++/* LGPL-2.1-or-later: part of the Wine unix side (see docs/LICENSING.md). */
++/*
++ * winios OpenGL driver. Two backends, chosen at init by MADEIRA_GL_BACKEND
++ * (set by WineProcessBridge.m from madeira.cfg `gl-backend`):
++ *   zink - desktop OpenGL 3.3-4.x through Mesa OSMesa + Zink on MoltenVK
++ *          (see the "zink backend" section below)
++ *   gles - WGL on top of Apple's OpenGL ES 3.0 (EAGL), described here;
++ *          also the fallback when Zink cannot start.
++ *
++ * iOS has no desktop OpenGL. What it has is OpenGL ES 3.0 through EAGL, which is
++ * deprecated but still ships (iOS 27 SDK) and is what LOVE, SDL and most GLES
++ * code on iOS target. This driver plugs it in behind win32u's WGL layer:
++ *
++ *  - Contexts are EAGLContexts (API 3, falling back to 2), created and made
++ *    current by app/Madeira/Winios/WiniosGL.m. Every context is GLES whatever
++ *    the app asked for, so an app that insists on desktop GL sees
++ *    "OpenGL ES 3.0 ..." from glGetString and fails its own version check
++ *    instead of crashing. LOVE is told to ask for GLES (WineProcessBridge.m).
++ *  - EAGL has no window-system framebuffer: FBO 0 is not a surface. opengl32
++ *    already emulates the default framebuffer with FBOs (drawable->draw_fbo /
++ *    read_fbo + buffer_map), so each window drawable here is one FBO. GLES 3
++ *    only allows COLOR_ATTACHMENTi in draw-buffer slot i, so instead of Wine's
++ *    front/back attachment pairs every front/back/left buffer maps to
++ *    COLOR_ATTACHMENT0; "swap" is then a copy of that attachment to the screen.
++ *  - Present (swap, or a flush of front-buffer rendering) hands the FBO to
++ *    WiniosGL.m, which blits it into an IOSurface and draws that onto the
++ *    window's CAMetalLayer -- the same layer DXMT presents to.
++ *  - Entry points come straight from OpenGLES.framework. Desktop-only GL 1.x
++ *    functions that apps and opengl32 still call get small translations
++ *    (glClearDepth, glDepthRange, glDrawBuffer, glGetDoublev) or a no-op stub,
++ *    so a stray fixed-function call cannot jump through a NULL pointer.
++ *
++ * Not supported yet: pbuffers, multisampled pixel formats, desktop GL profiles.
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include <dlfcn.h>
++#include <pthread.h>
++
++#include "ntstatus.h"
++#include "ntgdi_private.h"
++#include "ntuser_private.h"
++#include "win32u_private.h"
++#include "wine/opengl_driver.h"
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(wgl);
++
++/* WiniosGL.m */
++extern void *madeira_gl_context_create( void *share, int *major );
++extern void madeira_gl_context_release( void *context );
++extern int madeira_gl_make_current( void *context );
++extern int madeira_gl_present( void **state, void *hwnd, unsigned int fbo, int width, int height );
++extern void madeira_gl_present_release( void *state );
++extern void madeira_gl_wait_active( void );
++extern void *madeira_zink_target_bind( void **state, void *hwnd, int width, int height, int *row_pixels );
++extern void *madeira_zink_target_present( void **state, void *hwnd, int *row_pixels );
++extern void madeira_zink_target_release( void *state );
++
++#define OPENGLES_PATH "/System/Library/Frameworks/OpenGLES.framework/OpenGLES"
++
++static void *gles_handle;
++
++/* GLES entry points this driver calls itself. */
++static void (*p_glGenFramebuffers)( GLsizei, GLuint * );
++static void (*p_glDeleteFramebuffers)( GLsizei, const GLuint * );
++static void (*p_glBindFramebuffer)( GLenum, GLuint );
++static void (*p_glGenRenderbuffers)( GLsizei, GLuint * );
++static void (*p_glDeleteRenderbuffers)( GLsizei, const GLuint * );
++static void (*p_glBindRenderbuffer)( GLenum, GLuint );
++static void (*p_glRenderbufferStorage)( GLenum, GLenum, GLsizei, GLsizei );
++static void (*p_glFramebufferRenderbuffer)( GLenum, GLenum, GLenum, GLuint );
++static GLenum (*p_glCheckFramebufferStatus)( GLenum );
++static void (*p_glGetIntegerv)( GLenum, GLint * );
++static void (*p_glGetFloatv)( GLenum, GLfloat * );
++static void (*p_glClearDepthf)( GLfloat );
++static void (*p_glDepthRangef)( GLfloat, GLfloat );
++static void (*p_glDrawBuffers)( GLsizei, const GLenum * );
++
++/* ---- pixel formats ---------------------------------------------------- */
++
++struct ios_format
++{
++    BYTE depth;
++    BYTE stencil;
++    BOOL doublebuffer;
++};
++
++/* All RGBA8888. Double-buffered formats first: apps that walk the list take
++ * the first acceptable one. */
++static const struct ios_format ios_formats[] =
++{
++    { 24, 8, TRUE  },
++    { 24, 0, TRUE  },
++    { 16, 0, TRUE  },
++    {  0, 0, TRUE  },
++    { 24, 8, FALSE },
++    {  0, 0, FALSE },
++};
++
++static const struct ios_format *format_from_index( int format )
++{
++    if (format < 1 || format > ARRAY_SIZE(ios_formats)) return NULL;
++    return &ios_formats[format - 1];
++}
++
++static UINT ios_init_pixel_formats( UINT *onscreen_count )
++{
++    *onscreen_count = ARRAY_SIZE(ios_formats);
++    return ARRAY_SIZE(ios_formats);
++}
++
++static BOOL ios_describe_pixel_format( int format, struct wgl_pixel_format *fmt )
++{
++    const struct ios_format *f = format_from_index( format );
++    PIXELFORMATDESCRIPTOR *pfd = &fmt->pfd;
++
++    if (!f) return FALSE;
++
++    memset( fmt, 0, sizeof(*fmt) );
++    pfd->nSize = sizeof(*pfd);
++    pfd->nVersion = 1;
++    pfd->dwFlags = PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW | PFD_SUPPORT_COMPOSITION;
++    if (f->doublebuffer) pfd->dwFlags |= PFD_DOUBLEBUFFER;
++    pfd->iPixelType = PFD_TYPE_RGBA;
++    pfd->iLayerType = PFD_MAIN_PLANE;
++    pfd->cColorBits = 32;
++    pfd->cRedBits = pfd->cGreenBits = pfd->cBlueBits = pfd->cAlphaBits = 8;
++    pfd->cBlueShift = 0;
++    pfd->cGreenShift = 8;
++    pfd->cRedShift = 16;
++    pfd->cAlphaShift = 24;
++    pfd->cDepthBits = f->depth;
++    pfd->cStencilBits = f->stencil;
++
++    fmt->swap_method = WGL_SWAP_COPY_ARB;   /* swap copies the back buffer out, it survives */
++    fmt->transparent = GL_FALSE;
++    fmt->pixel_type = WGL_TYPE_RGBA_ARB;
++    fmt->draw_to_pbuffer = GL_FALSE;
++    fmt->transparent_alpha_value_valid = GL_TRUE;
++    fmt->transparent_index_value_valid = GL_TRUE;
++    fmt->sample_buffers = 0;
++    fmt->samples = 0;
++    fmt->framebuffer_srgb_capable = GL_FALSE;
++    fmt->float_components = GL_FALSE;
++    return TRUE;
++}
++
++static const char *ios_init_wgl_extensions( struct opengl_funcs *funcs )
++{
++    /* SDL only creates an OpenGL ES context through WGL when these are listed
++     * (otherwise it goes looking for ANGLE's libEGL.dll). */
++    return "WGL_EXT_create_context_es2_profile WGL_EXT_create_context_es_profile";
++}
++
++/* ---- entry points ----------------------------------------------------- */
++
++static void WINAPI ios_glClearDepth( GLdouble depth )
++{
++    p_glClearDepthf( depth );
++}
++
++static void WINAPI ios_glDepthRange( GLdouble n, GLdouble f )
++{
++    p_glDepthRangef( n, f );
++}
++
++static void WINAPI ios_glDrawBuffer( GLenum buf )
++{
++    /* opengl32 has already mapped GL_BACK & co to COLOR_ATTACHMENT0 for the
++     * default framebuffer; GLES 3 spells single draw buffers as a one-entry list. */
++    p_glDrawBuffers( 1, &buf );
++}
++
++static void WINAPI ios_glGetDoublev( GLenum pname, GLdouble *data )
++{
++    GLfloat values[16];
++    int count = 1;
++
++    switch (pname)
++    {
++    case GL_VIEWPORT:
++    case GL_SCISSOR_BOX:
++    case GL_COLOR_CLEAR_VALUE:
++    case GL_COLOR_WRITEMASK:
++    case GL_BLEND_COLOR:
++        count = 4;
++        break;
++    case GL_DEPTH_RANGE:
++    case GL_ALIASED_LINE_WIDTH_RANGE:
++    case GL_ALIASED_POINT_SIZE_RANGE:
++    case GL_MAX_VIEWPORT_DIMS:
++        count = 2;
++        break;
++    }
++    p_glGetFloatv( pname, values );
++    for (int i = 0; i < count; i++) data[i] = values[i];
++}
++
++/* GL 1.x functions GLES does not have (glBegin, glMatrixMode, ...). They are
++ * part of opengl32's export table, so they must resolve to something. */
++static INT_PTR WINAPI ios_gl_unsupported(void)
++{
++    static LONG warned;
++    if (!InterlockedExchange( &warned, 1 ))
++        ERR( "[winios-gl] a desktop-only OpenGL 1.x function was called; it does nothing on OpenGL ES\n" );
++    return 0;
++}
++
++static const char *const gl_core_names[] =
++{
++#define USE_GL_FUNC(name) #name,
++    ALL_GL_FUNCS
++#undef USE_GL_FUNC
++};
++
++static BOOL is_gl_core_name( const char *name )
++{
++    for (UINT i = 0; i < ARRAY_SIZE(gl_core_names); i++)
++        if (!strcmp( gl_core_names[i], name )) return TRUE;
++    return FALSE;
++}
++
++static void *ios_get_proc_address( const char *name )
++{
++    void *ret;
++
++    if (!strcmp( name, "glClearDepth" )) return ios_glClearDepth;
++    if (!strcmp( name, "glDepthRange" )) return ios_glDepthRange;
++    if (!strcmp( name, "glDrawBuffer" )) return ios_glDrawBuffer;
++    if (!strcmp( name, "glGetDoublev" )) return ios_glGetDoublev;
++
++    if ((ret = dlsym( gles_handle, name ))) return ret;
++    if (is_gl_core_name( name )) return ios_gl_unsupported;
++    return NULL;
++}
++
++/* ---- contexts --------------------------------------------------------- */
++
++static BOOL ios_context_create( int format, void *share, const int *attribs, void **context )
++{
++    int major = 0, minor = 0, profile = 0, got = 0;
++
++    for (; attribs && attribs[0]; attribs += 2)
++    {
++        switch (attribs[0])
++        {
++        case WGL_CONTEXT_MAJOR_VERSION_ARB: major = attribs[1]; break;
++        case WGL_CONTEXT_MINOR_VERSION_ARB: minor = attribs[1]; break;
++        case WGL_CONTEXT_PROFILE_MASK_ARB: profile = attribs[1]; break;
++        }
++    }
++
++    if (!(*context = madeira_gl_context_create( share, &got )))
++    {
++        ERR( "[winios-gl] EAGLContext creation failed (format %d, share %p)\n", format, share );
++        return FALSE;
++    }
++
++    ERR( "[winios-gl] context %p: OpenGL ES %d.0 for a %s %d.%d request (format %d, share %p)\n",
++         *context, got, (profile & WGL_CONTEXT_ES2_PROFILE_BIT_EXT) ? "GLES" :
++         (profile & WGL_CONTEXT_CORE_PROFILE_BIT_ARB) ? "desktop core" : "desktop",
++         major, minor, format, share );
++    return TRUE;
++}
++
++static BOOL ios_context_destroy( void *context )
++{
++    TRACE( "context %p\n", context );
++    madeira_gl_context_release( context );
++    return TRUE;
++}
++
++static BOOL ios_make_current( struct opengl_drawable *draw, struct opengl_drawable *read, void *context )
++{
++    TRACE( "draw %s, read %s, context %p\n", debugstr_opengl_drawable( draw ), debugstr_opengl_drawable( read ), context );
++    return madeira_gl_make_current( context );
++}
++
++/* ---- window drawables ------------------------------------------------- */
++
++struct ios_surface
++{
++    struct opengl_drawable base;
++    void   *fbo_context;   /* EAGLContext the FBO lives in (FBOs are per context) */
++    GLuint  color;         /* renderbuffers, shared across the sharegroup */
++    GLuint  depth;
++    int     width;
++    int     height;
++    void   *present_state; /* WiniosGL.m presenter */
++};
++
++static struct ios_surface *impl_from_drawable( struct opengl_drawable *base )
++{
++    return CONTAINING_RECORD( base, struct ios_surface, base );
++}
++
++static void drawable_client_size( struct opengl_drawable *drawable, int *width, int *height )
++{
++    HWND hwnd = drawable->client ? drawable->client->hwnd : 0;
++    RECT rect = {0};
++
++    if (hwnd) NtUserGetClientRect( hwnd, &rect, NtUserGetDpiForWindow( hwnd ) );
++    *width = max( rect.right - rect.left, 1 );
++    *height = max( rect.bottom - rect.top, 1 );
++}
++
++static void surface_client_size( struct ios_surface *surface, int *width, int *height )
++{
++    drawable_client_size( &surface->base, width, height );
++}
++
++static void surface_storage( struct ios_surface *surface, int width, int height )
++{
++    const struct ios_format *f = format_from_index( surface->base.format );
++    GLint prev_rb = 0;
++
++    p_glGetIntegerv( GL_RENDERBUFFER_BINDING, &prev_rb );
++    p_glBindRenderbuffer( GL_RENDERBUFFER, surface->color );
++    p_glRenderbufferStorage( GL_RENDERBUFFER, GL_RGBA8, width, height );
++    if (surface->depth)
++    {
++        GLenum depth_format = f->stencil ? GL_DEPTH24_STENCIL8 :
++                              f->depth == 16 ? GL_DEPTH_COMPONENT16 : GL_DEPTH_COMPONENT24;
++        p_glBindRenderbuffer( GL_RENDERBUFFER, surface->depth );
++        p_glRenderbufferStorage( GL_RENDERBUFFER, depth_format, width, height );
++    }
++    p_glBindRenderbuffer( GL_RENDERBUFFER, prev_rb );
++
++    surface->width = width;
++    surface->height = height;
++    TRACE( "%s storage %dx%d\n", debugstr_opengl_drawable( &surface->base ), width, height );
++}
++
++static void surface_delete_objects( struct ios_surface *surface )
++{
++    if (surface->base.draw_fbo) p_glDeleteFramebuffers( 1, &surface->base.draw_fbo );
++    if (surface->color) p_glDeleteRenderbuffers( 1, &surface->color );
++    if (surface->depth) p_glDeleteRenderbuffers( 1, &surface->depth );
++    surface->base.draw_fbo = surface->base.read_fbo = 0;
++    surface->color = surface->depth = 0;
++    surface->fbo_context = NULL;
++}
++
++/* Called with `context` current (or NULL while the old one is still current). */
++static void ios_surface_set_context( struct opengl_drawable *base, void *context )
++{
++    struct ios_surface *surface = impl_from_drawable( base );
++    const struct ios_format *f = format_from_index( base->format );
++    GLint prev_draw = 0, prev_read = 0;
++    GLenum status;
++    int width, height;
++
++    TRACE( "%s, context %p\n", debugstr_opengl_drawable( base ), context );
++
++    if (!context)
++    {
++        /* win32u unsets drawables while their context is still current. */
++        surface_delete_objects( surface );
++        return;
++    }
++    if (surface->fbo_context == context && base->draw_fbo) return;
++    if (surface->fbo_context)
++    {
++        /* Still owned by another context (another thread): deleting these names
++         * here would hit whatever the current context calls them. Leak them. */
++        WARN( "[winios-gl] %s moves from context %p to %p, dropping its framebuffer\n",
++              debugstr_opengl_drawable( base ), surface->fbo_context, context );
++        base->draw_fbo = base->read_fbo = 0;
++        surface->color = surface->depth = 0;
++    }
++
++    p_glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw );
++    p_glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &prev_read );
++
++    p_glGenFramebuffers( 1, &base->draw_fbo );
++    base->read_fbo = base->draw_fbo;
++    p_glGenRenderbuffers( 1, &surface->color );
++    if (f->depth || f->stencil) p_glGenRenderbuffers( 1, &surface->depth );
++
++    surface_client_size( surface, &width, &height );
++    surface_storage( surface, width, height );
++
++    p_glBindFramebuffer( GL_FRAMEBUFFER, base->draw_fbo );
++    p_glFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, surface->color );
++    if (surface->depth)
++    {
++        p_glFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, surface->depth );
++        if (f->stencil)
++            p_glFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, surface->depth );
++    }
++    status = p_glCheckFramebufferStatus( GL_FRAMEBUFFER );
++    if (status != GL_FRAMEBUFFER_COMPLETE)
++        ERR( "[winios-gl] %s: framebuffer incomplete %#x\n", debugstr_opengl_drawable( base ), status );
++
++    p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, prev_draw );
++    p_glBindFramebuffer( GL_READ_FRAMEBUFFER, prev_read );
++
++    surface->fbo_context = context;
++    ERR( "[winios-gl] %s: framebuffer %u %dx%d depth %u stencil %u in context %p\n",
++         debugstr_opengl_drawable( base ), base->draw_fbo, width, height, f->depth, f->stencil, context );
++}
++
++static BOOL surface_present( struct ios_surface *surface )
++{
++    HWND hwnd = surface->base.client ? surface->base.client->hwnd : 0;
++
++    if (!hwnd || !surface->base.draw_fbo) return FALSE;
++    madeira_gl_wait_active();   /* no GPU work while the app is in the background */
++    return madeira_gl_present( &surface->present_state, hwnd, surface->base.draw_fbo,
++                               surface->width, surface->height );
++}
++
++static void ios_surface_flush( struct opengl_drawable *base, UINT flags )
++{
++    struct ios_surface *surface = impl_from_drawable( base );
++    int width, height;
++
++    TRACE( "%s, flags %#x\n", debugstr_opengl_drawable( base ), flags );
++
++    if ((flags & GL_FLUSH_UPDATED) && base->draw_fbo)
++    {
++        surface_client_size( surface, &width, &height );
++        if (width != surface->width || height != surface->height) surface_storage( surface, width, height );
++    }
++    if (flags & GL_FLUSH_PRESENT) surface_present( surface );
++}
++
++static BOOL ios_surface_swap( struct opengl_drawable *base )
++{
++    struct ios_surface *surface = impl_from_drawable( base );
++    TRACE( "%s\n", debugstr_opengl_drawable( base ) );
++    return surface_present( surface );
++}
++
++static void ios_surface_destroy( struct opengl_drawable *base )
++{
++    struct ios_surface *surface = impl_from_drawable( base );
++    TRACE( "%s\n", debugstr_opengl_drawable( base ) );
++    /* The GL objects went with set_context( NULL ); only the presenter is left. */
++    if (surface->present_state) madeira_gl_present_release( surface->present_state );
++}
++
++static const struct opengl_drawable_funcs ios_surface_funcs =
++{
++    .destroy = ios_surface_destroy,
++    .flush = ios_surface_flush,
++    .swap = ios_surface_swap,
++    .set_context = ios_surface_set_context,
++};
++
++static BOOL ios_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
++{
++    struct client_surface *client;
++    struct ios_surface *surface;
++
++    TRACE( "hwnd %p, format %d\n", hwnd, format );
++
++    if (!format_from_index( format )) return FALSE;
++    if (!(client = nulldrv_client_surface_create( hwnd ))) return FALSE;
++    surface = opengl_drawable_create( sizeof(*surface), &ios_surface_funcs, format, client );
++    client_surface_release( client );
++    if (!surface) return FALSE;
++
++    /* One colour attachment backs every buffer name; see the file comment. */
++    for (UINT i = 0; i < ARRAY_SIZE(surface->base.buffer_map); i++)
++        surface->base.buffer_map[i] = GL_NONE;
++    surface->base.buffer_map[GL_FRONT_LEFT - GL_FRONT_LEFT] = GL_COLOR_ATTACHMENT0;
++    surface->base.buffer_map[GL_BACK_LEFT - GL_FRONT_LEFT] = GL_COLOR_ATTACHMENT0;
++    surface->base.buffer_map[GL_FRONT - GL_FRONT_LEFT] = GL_COLOR_ATTACHMENT0;
++    surface->base.buffer_map[GL_BACK - GL_FRONT_LEFT] = GL_COLOR_ATTACHMENT0;
++    surface->base.buffer_map[GL_LEFT - GL_FRONT_LEFT] = GL_COLOR_ATTACHMENT0;
++    surface->base.buffer_map[GL_FRONT_AND_BACK - GL_FRONT_LEFT] = GL_COLOR_ATTACHMENT0;
++
++    ERR( "[winios-gl] window drawable %p for hwnd %p format %d\n", surface, hwnd, format );
++    *drawable = &surface->base;
++    return TRUE;
++}
++
++/* ---- pbuffers (not supported) ------------------------------------------ */
++
++static BOOL ios_pbuffer_create( HDC hdc, int format, BOOL largest, GLenum texture_format, GLenum texture_target,
++                                GLint max_level, GLsizei *width, GLsizei *height, struct opengl_drawable **drawable )
++{
++    FIXME( "[winios-gl] pbuffers are not supported (hdc %p, format %d, %dx%d)\n", hdc, format, *width, *height );
++    return FALSE;
++}
++
++static BOOL ios_pbuffer_updated( HDC hdc, struct opengl_drawable *drawable, GLenum cube_face, GLint mipmap_level )
++{
++    return GL_TRUE;
++}
++
++static UINT ios_pbuffer_bind( HDC hdc, struct opengl_drawable *drawable, GLenum buffer )
++{
++    return -1; /* default implementation */
++}
++
++static const struct opengl_driver_funcs ios_driver_funcs =
++{
++    .p_get_proc_address = ios_get_proc_address,
++    .p_init_pixel_formats = ios_init_pixel_formats,
++    .p_describe_pixel_format = ios_describe_pixel_format,
++    .p_init_wgl_extensions = ios_init_wgl_extensions,
++    .p_surface_create = ios_surface_create,
++    .p_context_create = ios_context_create,
++    .p_context_destroy = ios_context_destroy,
++    .p_make_current = ios_make_current,
++    .p_pbuffer_create = ios_pbuffer_create,
++    .p_pbuffer_updated = ios_pbuffer_updated,
++    .p_pbuffer_bind = ios_pbuffer_bind,
++};
++
++/* ======================================================================
++ * "zink" backend: desktop OpenGL 3.3-4.x through Mesa.
++ *
++ * Mesa's OSMesa frontend with the Zink driver (GL -> Vulkan), on MoltenVK
++ * (Vulkan -> Metal); both dylibs ship in the bundle's gl/ folder
++ * (build/mesa-ios/build.sh, build/moltenvk-ios/build.sh). OSMesa renders into
++ * its own GPU texture and copies each finished frame, on glFlush/glFinish, into
++ * a buffer we pass to OSMesaMakeCurrent: one of three IOSurfaces per window
++ * (WiniosGL.m), which Metal then draws onto the window's layer. The default
++ * framebuffer is OSMesa's own, so opengl32's FBO emulation stays off
++ * (draw_fbo = 0). OSMesa visuals are single-buffered, so every BACK buffer
++ * name maps to its FRONT twin; "swap" is glFinish + present + rebind.
++ * ====================================================================== */
++
++#define OSMESA_BGRA                  0x1
++#define OSMESA_ROW_LENGTH            0x10
++#define OSMESA_Y_UP                  0x11
++#define OSMESA_FORMAT                0x22
++#define OSMESA_DEPTH_BITS            0x30
++#define OSMESA_STENCIL_BITS          0x31
++#define OSMESA_ACCUM_BITS            0x32
++#define OSMESA_PROFILE               0x33
++#define OSMESA_CORE_PROFILE          0x34
++#define OSMESA_COMPAT_PROFILE        0x35
++#define OSMESA_CONTEXT_MAJOR_VERSION 0x36
++#define OSMESA_CONTEXT_MINOR_VERSION 0x37
++
++static void *osmesa_handle;
++static void *(*pOSMesaCreateContextAttribs)( const int *attribs, void *share );
++static void (*pOSMesaDestroyContext)( void *ctx );
++static GLboolean (*pOSMesaMakeCurrent)( void *ctx, void *buffer, GLenum type, GLsizei width, GLsizei height );
++static void *(*pOSMesaGetCurrentContext)( void );
++static void (*pOSMesaPixelStore)( GLint pname, GLint value );
++static void *(*pOSMesaGetProcAddress)( const char *name );
++static void (*pz_glFinish)( void );
++static const GLubyte *(*pz_glGetString)( GLenum );
++
++struct zink_surface
++{
++    struct opengl_drawable base;
++    void *target;        /* WiniosGL.m IOSurface ring + presenter */
++    int   width;
++    int   height;
++};
++
++/* the drawable bound to this thread's current OSMesa context */
++static __thread struct zink_surface *zink_current;
++
++static struct zink_surface *zink_from_drawable( struct opengl_drawable *base )
++{
++    return CONTAINING_RECORD( base, struct zink_surface, base );
++}
++
++static HWND drawable_hwnd( struct opengl_drawable *drawable )
++{
++    return drawable->client ? drawable->client->hwnd : 0;
++}
++
++static const char *zink_init_wgl_extensions( struct opengl_funcs *funcs )
++{
++    return "";   /* desktop OpenGL only: no ES profiles */
++}
++
++static void *zink_get_proc_address( const char *name )
++{
++    return pOSMesaGetProcAddress( name );
++}
++
++static BOOL zink_context_create( int format, void *share, const int *attribs, void **context )
++{
++    const struct ios_format *f = format_from_index( format );
++    int major = 0, minor = 0, profile = 0, a[20], n = 0;
++
++    for (; attribs && attribs[0]; attribs += 2)
++    {
++        switch (attribs[0])
++        {
++        case WGL_CONTEXT_MAJOR_VERSION_ARB: major = attribs[1]; break;
++        case WGL_CONTEXT_MINOR_VERSION_ARB: minor = attribs[1]; break;
++        case WGL_CONTEXT_PROFILE_MASK_ARB: profile = attribs[1]; break;
++        }
++    }
++    if (profile & WGL_CONTEXT_ES2_PROFILE_BIT_EXT)
++    {
++        ERR( "[winios-gl] zink: OpenGL ES %d.%d requested, only desktop OpenGL is available\n", major, minor );
++        return FALSE;
++    }
++
++    a[n++] = OSMESA_FORMAT;       a[n++] = OSMESA_BGRA;
++    a[n++] = OSMESA_DEPTH_BITS;   a[n++] = f ? f->depth : 24;
++    a[n++] = OSMESA_STENCIL_BITS; a[n++] = f ? f->stencil : 8;
++    a[n++] = OSMESA_ACCUM_BITS;   a[n++] = 0;
++    a[n++] = OSMESA_PROFILE;
++    a[n++] = (profile & WGL_CONTEXT_CORE_PROFILE_BIT_ARB) ? OSMESA_CORE_PROFILE : OSMESA_COMPAT_PROFILE;
++    if (major)
++    {
++        a[n++] = OSMESA_CONTEXT_MAJOR_VERSION; a[n++] = major;
++        a[n++] = OSMESA_CONTEXT_MINOR_VERSION; a[n++] = minor;
++    }
++    a[n] = 0;
++
++    if (!(*context = pOSMesaCreateContextAttribs( a, share )))
++    {
++        ERR( "[winios-gl] zink: no context for a %s %d.%d request (format %d)\n",
++             (profile & WGL_CONTEXT_CORE_PROFILE_BIT_ARB) ? "core" : "compatibility", major, minor, format );
++        return FALSE;
++    }
++    ERR( "[winios-gl] zink: context %p for a %s %d.%d request (format %d, share %p)\n", *context,
++         (profile & WGL_CONTEXT_CORE_PROFILE_BIT_ARB) ? "core" : "compatibility", major, minor, format, share );
++    return TRUE;
++}
++
++static BOOL zink_context_destroy( void *context )
++{
++    pOSMesaDestroyContext( context );
++    return TRUE;
++}
++
++/* Point OSMesa at `buffer` (the locked IOSurface slot) for `surface`. */
++static BOOL zink_attach( struct zink_surface *surface, void *context, void *buffer, int row_pixels )
++{
++    if (!pOSMesaMakeCurrent( context, buffer, GL_UNSIGNED_BYTE, surface->width, surface->height )) return FALSE;
++    pOSMesaPixelStore( OSMESA_ROW_LENGTH, row_pixels );
++    pOSMesaPixelStore( OSMESA_Y_UP, 1 );   /* bottom row first, as the present shader expects */
++    zink_current = surface;
++    return TRUE;
++}
++
++static BOOL zink_bind( struct zink_surface *surface, void *context )
++{
++    int row = 0;
++    void *buffer;
++
++    drawable_client_size( &surface->base, &surface->width, &surface->height );
++    if (!(buffer = madeira_zink_target_bind( &surface->target, drawable_hwnd( &surface->base ),
++                                             surface->width, surface->height, &row )))
++        return FALSE;
++    return zink_attach( surface, context, buffer, row );
++}
++
++static BOOL zink_make_current( struct opengl_drawable *draw, struct opengl_drawable *read, void *context )
++{
++    TRACE( "draw %s, read %s, context %p\n", debugstr_opengl_drawable( draw ), debugstr_opengl_drawable( read ), context );
++
++    if (!context)
++    {
++        zink_current = NULL;
++        return pOSMesaMakeCurrent( NULL, NULL, 0, 0, 0 );
++    }
++    if (!draw) return FALSE;
++    /* OSMesa has no separate read surface; reads come from the draw buffer. */
++    return zink_bind( zink_from_drawable( draw ), context );
++}
++
++static BOOL zink_present( struct zink_surface *surface )
++{
++    void *context = pOSMesaGetCurrentContext(), *next;
++    int row = 0;
++
++    if (!context || zink_current != surface) return FALSE;
++    madeira_gl_wait_active();   /* no GPU work while the app is in the background */
++    pz_glFinish();   /* OSMesa copies the frame into the locked IOSurface */
++    if (!(next = madeira_zink_target_present( &surface->target, drawable_hwnd( &surface->base ), &row )))
++        return FALSE;
++    return zink_attach( surface, context, next, row );
++}
++
++static void zink_surface_flush( struct opengl_drawable *base, UINT flags )
++{
++    struct zink_surface *surface = zink_from_drawable( base );
++    int width, height;
++
++    TRACE( "%s, flags %#x\n", debugstr_opengl_drawable( base ), flags );
++
++    if ((flags & GL_FLUSH_UPDATED) && zink_current == surface)
++    {
++        drawable_client_size( base, &width, &height );
++        if (width != surface->width || height != surface->height)
++            zink_bind( surface, pOSMesaGetCurrentContext() );
++    }
++    if (flags & GL_FLUSH_PRESENT) zink_present( surface );
++}
++
++static BOOL zink_surface_swap( struct opengl_drawable *base )
++{
++    TRACE( "%s\n", debugstr_opengl_drawable( base ) );
++    return zink_present( zink_from_drawable( base ) );
++}
++
++static void zink_surface_destroy( struct opengl_drawable *base )
++{
++    struct zink_surface *surface = zink_from_drawable( base );
++    if (zink_current == surface) zink_current = NULL;
++    if (surface->target) madeira_zink_target_release( surface->target );
++}
++
++static const struct opengl_drawable_funcs zink_surface_funcs =
++{
++    .destroy = zink_surface_destroy,
++    .flush = zink_surface_flush,
++    .swap = zink_surface_swap,
++};
++
++static BOOL zink_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
++{
++    struct client_surface *client;
++    struct zink_surface *surface;
++
++    if (!format_from_index( format )) return FALSE;
++    if (!(client = nulldrv_client_surface_create( hwnd ))) return FALSE;
++    surface = opengl_drawable_create( sizeof(*surface), &zink_surface_funcs, format, client );
++    client_surface_release( client );
++    if (!surface) return FALSE;
++
++    /* Single-buffered OSMesa visual: back buffers are the front buffer. */
++    surface->base.buffer_map[GL_BACK_LEFT - GL_FRONT_LEFT] = GL_FRONT_LEFT;
++    surface->base.buffer_map[GL_BACK_RIGHT - GL_FRONT_LEFT] = GL_NONE;
++    surface->base.buffer_map[GL_FRONT_RIGHT - GL_FRONT_LEFT] = GL_NONE;
++    surface->base.buffer_map[GL_BACK - GL_FRONT_LEFT] = GL_FRONT;
++    surface->base.buffer_map[GL_RIGHT - GL_FRONT_LEFT] = GL_NONE;
++    surface->base.buffer_map[GL_FRONT_AND_BACK - GL_FRONT_LEFT] = GL_FRONT;
++
++    ERR( "[winios-gl] zink: window drawable %p for hwnd %p format %d\n", surface, hwnd, format );
++    *drawable = &surface->base;
++    return TRUE;
++}
++
++static const struct opengl_driver_funcs zink_driver_funcs =
++{
++    .p_get_proc_address = zink_get_proc_address,
++    .p_init_pixel_formats = ios_init_pixel_formats,
++    .p_describe_pixel_format = ios_describe_pixel_format,
++    .p_init_wgl_extensions = zink_init_wgl_extensions,
++    .p_surface_create = zink_surface_create,
++    .p_context_create = zink_context_create,
++    .p_context_destroy = zink_context_destroy,
++    .p_make_current = zink_make_current,
++    .p_pbuffer_create = ios_pbuffer_create,
++    .p_pbuffer_updated = ios_pbuffer_updated,
++    .p_pbuffer_bind = ios_pbuffer_bind,
++};
++
++/* Load OSMesa and prove Zink actually runs: a throwaway core-profile context
++ * must report the Zink renderer. Mesa quietly falls back to softpipe when
++ * Zink cannot start (no MoltenVK, missing Vulkan features), and a software
++ * rasterizer is not an acceptable desktop-GL backend for games. */
++static BOOL zink_init(void)
++{
++    static const int attribs[] = { OSMESA_FORMAT, OSMESA_BGRA, OSMESA_PROFILE, OSMESA_CORE_PROFILE,
++                                   OSMESA_CONTEXT_MAJOR_VERSION, 3, OSMESA_CONTEXT_MINOR_VERSION, 3, 0 };
++    const char *dir = getenv( "MADEIRA_GL_DIR" );
++    const char *renderer, *version;
++    char path[4096];
++    unsigned int pixels[16];
++    void *ctx;
++
++    if (!dir || !*dir)
++    {
++        ERR( "[winios-gl] zink: MADEIRA_GL_DIR is not set\n" );
++        return FALSE;
++    }
++    snprintf( path, sizeof(path), "%s/libMoltenVK.dylib", dir );
++    setenv( "ZINK_VULKAN_LIBRARY", path, 1 );
++    setenv( "GALLIUM_DRIVER", "zink", 1 );
++    setenv( "MVK_CONFIG_LOG_LEVEL", "1", 0 );   /* MoltenVK: errors only */
++    /* Metal has no geometry shaders, so Zink on MoltenVK honestly reports at
++     * most OpenGL 3.1 -- 3.2 core requires them -- and every 3.3 core request
++     * fails. Advertise 4.1 (what macOS ships, what GL games target on Apple)
++     * with GLSL 4.10, the same trade PojavLauncher makes on iOS: games that
++     * never use geometry shaders run; one that does gets a shader or pipeline
++     * error instead of no context at all. The override keeps each context's
++     * profile ("X.Y" without FC/COMPAT). overwrite=0: madeira.cfg env.* lines
++     * or the environment can set other values. Read once, at the first
++     * context, so it has to be set here. */
++    setenv( "MESA_GL_VERSION_OVERRIDE", "4.1", 0 );
++    setenv( "MESA_GLSL_VERSION_OVERRIDE", "410", 0 );
++
++    snprintf( path, sizeof(path), "%s/libOSMesa.dylib", dir );
++    if (!(osmesa_handle = dlopen( path, RTLD_NOW | RTLD_LOCAL )))
++    {
++        ERR( "[winios-gl] zink: cannot load %s: %s\n", path, dlerror() );
++        return FALSE;
++    }
++#define LOAD_FUNCPTR( name ) \
++    if (!(p##name = dlsym( osmesa_handle, #name ))) \
++    { \
++        ERR( "[winios-gl] zink: %s missing from libOSMesa\n", #name ); \
++        return FALSE; \
++    }
++    LOAD_FUNCPTR( OSMesaCreateContextAttribs );
++    LOAD_FUNCPTR( OSMesaDestroyContext );
++    LOAD_FUNCPTR( OSMesaMakeCurrent );
++    LOAD_FUNCPTR( OSMesaGetCurrentContext );
++    LOAD_FUNCPTR( OSMesaPixelStore );
++    LOAD_FUNCPTR( OSMesaGetProcAddress );
++#undef LOAD_FUNCPTR
++    pz_glFinish = pOSMesaGetProcAddress( "glFinish" );
++    pz_glGetString = pOSMesaGetProcAddress( "glGetString" );
++    if (!pz_glFinish || !pz_glGetString) return FALSE;
++
++    if (!(ctx = pOSMesaCreateContextAttribs( attribs, NULL )))
++    {
++        /* Say what Zink does offer: a plain compatibility context. */
++        static const int compat[] = { OSMESA_FORMAT, OSMESA_BGRA, OSMESA_PROFILE, OSMESA_COMPAT_PROFILE, 0 };
++        ERR( "[winios-gl] zink: 3.3 core test context failed (MESA_GL_VERSION_OVERRIDE=%s)\n",
++             getenv( "MESA_GL_VERSION_OVERRIDE" ) );
++        if (!(ctx = pOSMesaCreateContextAttribs( compat, NULL )))
++        {
++            ERR( "[winios-gl] zink: compatibility test context failed too\n" );
++            return FALSE;
++        }
++    }
++    if (!pOSMesaMakeCurrent( ctx, pixels, GL_UNSIGNED_BYTE, 4, 4 ))
++    {
++        ERR( "[winios-gl] zink: test context cannot be made current\n" );
++        pOSMesaDestroyContext( ctx );
++        return FALSE;
++    }
++    renderer = (const char *)pz_glGetString( GL_RENDERER );
++    version = (const char *)pz_glGetString( GL_VERSION );
++    ERR( "[winios-gl] zink: test context says %s | %s\n", renderer ? renderer : "(null)", version ? version : "(null)" );
++    pOSMesaMakeCurrent( NULL, NULL, 0, 0, 0 );
++    pOSMesaDestroyContext( ctx );
++
++    if (!renderer || !strstr( renderer, "zink" ))
++    {
++        ERR( "[winios-gl] zink: renderer is not Zink (MoltenVK did not start?)\n" );
++        return FALSE;
++    }
++    return TRUE;
++}
++
++UINT winios_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs,
++                        const struct opengl_driver_funcs **driver_funcs )
++{
++    const char *backend = getenv( "MADEIRA_GL_BACKEND" );
++
++    if (version != WINE_OPENGL_DRIVER_VERSION)
++    {
++        ERR( "[winios-gl] version mismatch, win32u wants %u but driver has %u\n", version, WINE_OPENGL_DRIVER_VERSION );
++        return STATUS_INVALID_PARAMETER;
++    }
++
++    if (backend && !strcmp( backend, "zink" ))
++    {
++        if (zink_init())
++        {
++            ERR( "[winios-gl] desktop OpenGL (zink) driver ready (%u pixel formats)\n",
++                 (UINT)ARRAY_SIZE(ios_formats) );
++            *driver_funcs = &zink_driver_funcs;
++            return STATUS_SUCCESS;
++        }
++        ERR( "[winios-gl] zink unavailable, falling back to OpenGL ES\n" );
++    }
++
++    if (!(gles_handle = dlopen( OPENGLES_PATH, RTLD_NOW )))
++    {
++        ERR( "[winios-gl] cannot load %s: %s\n", OPENGLES_PATH, dlerror() );
++        return STATUS_NOT_SUPPORTED;
++    }
++
++#define LOAD_FUNCPTR( name ) \
++    if (!(p_##name = dlsym( gles_handle, #name ))) \
++    { \
++        ERR( "[winios-gl] %s missing from OpenGLES\n", #name ); \
++        return STATUS_NOT_SUPPORTED; \
++    }
++    LOAD_FUNCPTR( glGenFramebuffers );
++    LOAD_FUNCPTR( glDeleteFramebuffers );
++    LOAD_FUNCPTR( glBindFramebuffer );
++    LOAD_FUNCPTR( glGenRenderbuffers );
++    LOAD_FUNCPTR( glDeleteRenderbuffers );
++    LOAD_FUNCPTR( glBindRenderbuffer );
++    LOAD_FUNCPTR( glRenderbufferStorage );
++    LOAD_FUNCPTR( glFramebufferRenderbuffer );
++    LOAD_FUNCPTR( glCheckFramebufferStatus );
++    LOAD_FUNCPTR( glGetIntegerv );
++    LOAD_FUNCPTR( glGetFloatv );
++    LOAD_FUNCPTR( glClearDepthf );
++    LOAD_FUNCPTR( glDepthRangef );
++    LOAD_FUNCPTR( glDrawBuffers );
++#undef LOAD_FUNCPTR
++
++    ERR( "[winios-gl] OpenGL ES driver ready (%u pixel formats)\n", (UINT)ARRAY_SIZE(ios_formats) );
++    *driver_funcs = &ios_driver_funcs;
++    return STATUS_SUCCESS;
++}
+diff -ruN a/build/wineserver/bootstrap-base.sh b/build/wineserver/bootstrap-base.sh
+--- a/build/wineserver/bootstrap-base.sh
++++ b/build/wineserver/bootstrap-base.sh
+@@ -0,0 +1,55 @@
++#!/bin/bash
++# Build the base libwineserver.a that build.sh starts from, for a checkout that
++# has none (build.sh only patches an existing archive, and none is tracked).
++# Compiles every wine/server source with build.sh's flags into
++# obj/libwineserver.a; then run build.sh as usual.
++# Needs wine/build-macos (config.h and the generated headers), like build.sh.
++set -eu
++
++BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
++REPO_ROOT="$(cd "$BUILD_DIR/../.." && pwd)"
++WINE_SRC="$REPO_ROOT/wine"
++SDK=$(xcrun --sdk iphoneos --show-sdk-path)
++SHIMS_DIR="$REPO_ROOT/build/ntdll-unix/shims"
++OBJ_DIR="$BUILD_DIR/obj"
++BASE_DIR="$OBJ_DIR/base"
++mkdir -p "$BASE_DIR"
++
++# Same flags as build.sh.
++CC_FLAGS=(
++    -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 -O2
++    -I"$WINE_SRC/include" -I"$WINE_SRC/include/wine"
++    -I"$WINE_SRC/build-macos/include"
++    -I"$BUILD_DIR" -I"$WINE_SRC/server"
++    -I"$SHIMS_DIR"
++    -I"$BUILD_DIR/../madsync" -DHAVE_LINUX_NTSYNC_H=1
++    -include "$BUILD_DIR/config_ios.h"
++    -include stdarg.h
++    -include "$BUILD_DIR/unicode_fix.h"
++    -include "$BUILD_DIR/wineserver_ios_kill.h"
++    -DBINDIR=\"/usr/local/bin\" -DDATADIR=\"/usr/local/share\"
++    -D__WINESRC__ -DWINE_IOS=1
++    -Dmain=wineserver_main
++    -Wno-implicit-function-declaration
++)
++
++echo "=== Compiling wine/server sources ==="
++FAILED=""
++for src in $(sed -n '/^SOURCES/,/^$/p' "$WINE_SRC/server/Makefile.in" | tr -s ' \t\\' '\n' | grep '\.c$'); do
++    name=${src%.c}
++    echo -n "  $name... "
++    if xcrun -sdk iphoneos clang "${CC_FLAGS[@]}" -c "$WINE_SRC/server/$src" -o "$BASE_DIR/$name.o" 2>"$BASE_DIR/err-$name.txt"; then
++        echo "OK"
++    else
++        echo "FAILED (see $BASE_DIR/err-$name.txt)"
++        FAILED="$FAILED $name"
++    fi
++done
++if [ -n "$FAILED" ]; then
++    echo "Failed:$FAILED"
++    exit 1
++fi
++
++rm -f "$OBJ_DIR/libwineserver.a"
++ar rcs "$OBJ_DIR/libwineserver.a" "$BASE_DIR"/*.o
++echo "Base archive: $OBJ_DIR/libwineserver.a. Now run build/wineserver/build.sh."
+diff -ruN a/build/wineserver/build.sh b/build/wineserver/build.sh
+--- a/build/wineserver/build.sh
++++ b/build/wineserver/build.sh
+@@ -17,7 +17,7 @@
+     if [ -f "$APP_LIB" ]; then
+         cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
+     else
+-        echo "ERROR: No base libwineserver.a found"
++        echo "ERROR: No base libwineserver.a found; run build/wineserver/bootstrap-base.sh first"
+         exit 1
+     fi
+ fi
+@@ -87,6 +87,8 @@
+     "window:$BUILD_DIR/window_ios.c:window.o"
+     "user:$WINE_SRC/server/user.c:user.o"
+     "mapping:$BUILD_DIR/mapping_ios.c:mapping.o"
++    # Madeira: GC64 LuaJIT substitution, called from mapping_ios.c (both lists).
++    "luajit_compat:$BUILD_DIR/luajit_compat.c:luajit_compat.o"
+     "class:$WINE_SRC/server/class.c:class.o"
+     "region:$WINE_SRC/server/region.c:region.o"
+     "queue:$BUILD_DIR/queue_ios.c:queue.o"
+@@ -173,6 +175,7 @@
+     "region.o:region.o"
+     "queue.o:queue.o"
+     "mapping.o:mapping.o"
++    "luajit_compat.o:luajit_compat.o"
+     "winstation.o:winstation.o"
+     "thread.o:thread.o"
+     "sock.o:sock.o"
+diff -ruN a/build/wineserver/luajit_compat.c b/build/wineserver/luajit_compat.c
+--- a/build/wineserver/luajit_compat.c
++++ b/build/wineserver/luajit_compat.c
+@@ -0,0 +1,157 @@
++/*
++ * Madeira: substitute a GC64 LuaJIT for x64 LuaJIT builds that cannot run on iOS
++ *
++ * Copyright 2026 Connor Gow
++ * Written with AI assistance (Claude).
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++/*
++ * A 64-bit LuaJIT built without GC64 (every 2.0.x, and 2.1 with GC64 off)
++ * keeps 32-bit GC references, so it allocates its heap below 2 GB through
++ * NtAllocateVirtualMemory with zero bits (LJ_ALLOC_NTAVM in lj_alloc.c).
++ * iOS maps nothing below 4 GB, so luaL_newstate() returns NULL and the host
++ * program crashes on its first Lua call. LOVE games (Balatro, ...) ship such a
++ * lua51.dll.
++ *
++ * create_mapping() asks madeira_luajit_compat_fd() about every image section.
++ * For an x64 DLL that exports luaJIT_setmode and contains the string
++ * "NtAllocateVirtualMemory" -- only builds with LJ_ALLOC_NTAVM do -- it returns
++ * an fd of the GC64 build in the app bundle (build/luajit-x64/build.sh), and
++ * the section is created from that file instead. The game's file on disk is
++ * never touched. Detection is by content, not by file or program name.
++ */
++
++#include <fcntl.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++#define LJC_MAX_SCAN   (16u << 20)   /* a LuaJIT DLL is well under 1 MB */
++#define LJC_MAX_NAMES  4096
++
++static int ljc_read( int fd, void *buf, size_t len, off_t pos )
++{
++    return pread( fd, buf, len, pos ) == (ssize_t)len;
++}
++
++static uint16_t ljc_u16( const unsigned char *p ) { return p[0] | p[1] << 8; }
++static uint32_t ljc_u32( const unsigned char *p ) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
++
++/* File offset of an RVA, from the section table; -1 if it is in no section. */
++static off_t ljc_rva_to_off( const unsigned char *secs, unsigned int nsec, uint32_t rva )
++{
++    unsigned int i;
++
++    for (i = 0; i < nsec; i++)
++    {
++        const unsigned char *s = secs + i * 40;
++        uint32_t vsize = ljc_u32( s + 8 ), va = ljc_u32( s + 12 );
++        uint32_t rawsize = ljc_u32( s + 16 ), rawptr = ljc_u32( s + 20 );
++        uint32_t size = vsize > rawsize ? vsize : rawsize;
++        if (rva >= va && rva - va < size && rva - va < rawsize) return (off_t)rawptr + (rva - va);
++    }
++    return -1;
++}
++
++/* Does this x64 PE export luaJIT_setmode? The export name table is sorted, so
++ * a binary search reads about a dozen names. */
++static int ljc_exports_luajit( int fd )
++{
++    static const char want[] = "luaJIT_setmode";
++    unsigned char mz[64], nt[24 + 240], secs[96 * 40], exp[40];
++    unsigned int nsec, opt_size, lo, hi;
++    uint32_t lfanew, exp_rva, names_rva;
++    off_t exp_off, names_off;
++
++    if (!ljc_read( fd, mz, sizeof(mz), 0 ) || mz[0] != 'M' || mz[1] != 'Z') return 0;
++    lfanew = ljc_u32( mz + 0x3c );
++    if (!ljc_read( fd, nt, sizeof(nt), lfanew )) return 0;
++    if (memcmp( nt, "PE\0\0", 4 ) || ljc_u16( nt + 4 ) != 0x8664) return 0;   /* x64 only */
++    nsec = ljc_u16( nt + 6 );
++    opt_size = ljc_u16( nt + 20 );
++    if (ljc_u16( nt + 24 ) != 0x20b || opt_size < 112 + 8 || !nsec || nsec > 96) return 0;
++    exp_rva = ljc_u32( nt + 24 + 112 );                   /* DataDirectory[0] */
++    if (!exp_rva) return 0;
++    if (!ljc_read( fd, secs, nsec * 40, lfanew + 24 + opt_size )) return 0;
++
++    if ((exp_off = ljc_rva_to_off( secs, nsec, exp_rva )) < 0 || !ljc_read( fd, exp, sizeof(exp), exp_off ))
++        return 0;
++    hi = ljc_u32( exp + 24 );                              /* NumberOfNames */
++    names_rva = ljc_u32( exp + 32 );                       /* AddressOfNames */
++    if (!hi || hi > LJC_MAX_NAMES || (names_off = ljc_rva_to_off( secs, nsec, names_rva )) < 0) return 0;
++
++    for (lo = 0; lo < hi;)
++    {
++        unsigned int mid = lo + (hi - lo) / 2;
++        unsigned char rva_buf[4];
++        char name[sizeof(want)] = {0};
++        off_t name_off;
++        int cmp;
++
++        if (!ljc_read( fd, rva_buf, 4, names_off + mid * 4 )) return 0;
++        if ((name_off = ljc_rva_to_off( secs, nsec, ljc_u32( rva_buf ) )) < 0) return 0;
++        if (pread( fd, name, sizeof(name) - 1, name_off ) <= 0) return 0;
++        cmp = strncmp( name, want, sizeof(want) );   /* name holds at most strlen(want) chars */
++        if (!cmp)
++        {
++            char next = 0;   /* a longer name with the same prefix is not a match */
++            if (pread( fd, &next, 1, name_off + sizeof(want) - 1 ) == 1 && next) cmp = 1;
++            else return 1;
++        }
++        if (cmp < 0) lo = mid + 1;
++        else hi = mid;
++    }
++    return 0;
++}
++
++static int ljc_contains( int fd, off_t file_size, const char *needle )
++{
++    size_t nlen = strlen( needle );
++    char *buf;
++    int found = 0;
++
++    if (file_size <= 0 || file_size > LJC_MAX_SCAN || !(buf = malloc( file_size ))) return 0;
++    if (ljc_read( fd, buf, file_size, 0 )) found = memmem( buf, file_size, needle, nlen ) != NULL;
++    free( buf );
++    return found;
++}
++
++int madeira_luajit_compat_fd( int unix_fd, off_t file_size )
++{
++    const char *bundle = getenv( "WINEDLLPATH" );
++    char path[4096];
++    int fd;
++
++    if (!ljc_exports_luajit( unix_fd )) return -1;
++    if (!ljc_contains( unix_fd, file_size, "NtAllocateVirtualMemory" ))
++    {
++        fprintf( stderr, "[luajit-compat] x64 LuaJIT with GC64, left as is\n" );
++        return -1;
++    }
++    if (!bundle || snprintf( path, sizeof(path), "%s/compat/love/lua51.dll", bundle ) >= (int)sizeof(path))
++        return -1;
++    if ((fd = open( path, O_RDONLY | O_CLOEXEC )) == -1)
++    {
++        fprintf( stderr, "[luajit-compat] x64 LuaJIT needs memory below 2 GB, but %s is missing\n", path );
++        return -1;
++    }
++    fprintf( stderr, "[luajit-compat] x64 LuaJIT needs memory below 2 GB; mapping the bundled GC64 build instead\n" );
++    return fd;
++}
+diff -ruN a/build/wineserver/mapping_ios.c b/build/wineserver/mapping_ios.c
+--- a/build/wineserver/mapping_ios.c
++++ b/build/wineserver/mapping_ios.c
+@@ -181,6 +181,7 @@
+ 
+ static void mapping_dump( struct object *obj, int verbose );
+ static struct fd *mapping_get_fd( struct object *obj );
++extern int madeira_luajit_compat_fd( int unix_fd, off_t file_size );   /* luajit_compat.c */
+ static void mapping_destroy( struct object *obj );
+ static enum server_fd_type mapping_get_fd_type( struct fd *fd );
+ 
+@@ -1141,7 +1142,25 @@
+         }
+         if (flags & SEC_IMAGE)
+         {
+-            unsigned int err = get_image_params( mapping, st.st_size, unix_fd );
++            unsigned int err;
++            /* Madeira: an x64 LuaJIT that needs memory below 2 GB is mapped from
++             * the bundled GC64 build instead (luajit_compat.c). */
++            int compat_fd = madeira_luajit_compat_fd( unix_fd, st.st_size );
++            if (compat_fd != -1)
++            {
++                struct stat compat_st;
++                struct fd *compat = create_anonymous_fd( &mapping_fd_ops, compat_fd, &mapping->obj,
++                                                         FILE_SYNCHRONOUS_IO_NONALERT );
++                if (compat && fstat( compat_fd, &compat_st ) != -1)
++                {
++                    release_object( mapping->fd );
++                    mapping->fd = compat;
++                    unix_fd = compat_fd;
++                    st = compat_st;
++                }
++                else if (compat) release_object( compat );
++            }
++            err = get_image_params( mapping, st.st_size, unix_fd );
+             if (!err) return mapping;
+             set_error( err );
+             goto error;

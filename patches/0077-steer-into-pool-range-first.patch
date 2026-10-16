@@ -1,0 +1,36 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -22225,10 +22225,29 @@
+                  * described the EMPTY range [ios_spill_cap, 0) and every steer failed with
+                  * *ret = 0x0. The upper bound has to be a real address: use the host VA
+                  * ceiling, which is_beyond_limit treats as EXCLUSIVE. */
+-                NTSTATUS sst = allocate_virtual_memory( ret, size_ptr, type, protect,
+-                                                        ios_steer_slot,
+-                                                        (ULONG_PTR)host_addr_space_limit,
+-                                                        0, 0 );
++                /* Porthole 0077: a Madeira Dock session (MADEIRA_CAGE_RELEASE=1: Valve's client headless, no Chromium) has nothing in Chromium's pool range
++                 * [0x7400000000, 0x7c00000000), so steered reserves go THERE first and the emulator's own band (ios_steer_slot) is kept for the emulator. Rust through
++                 * Steam (2026-10-06): steered reserves reached 12 GB, most of them in the emulator band, and after ~6 minutes `THREADSTATE ALLOC FAILED ... the emulator
++                 * address band is exhausted` / `FEXAlloc could not allocate`, then an illegal instruction in the translated code; the pool range was nearly empty. */
++                static int steer_pa_first = -1;
++                NTSTATUS sst = STATUS_NO_MEMORY;
++                if (steer_pa_first < 0)
++                {
++                    const char *pe = getenv( "MADEIRA_CAGE_RELEASE" );
++                    const char *off = getenv( "MADEIRA_STEER_PA_FIRST" );
++                    steer_pa_first = pe && *pe == '1' && !(off && *off == '0');
++                    if (steer_pa_first) dprintf( 2, "[steer] 0077 steered reserves go to [0x7400000000,0x7c00000000) first; the emulator band keeps its space\n" );
++                }
++                if (steer_pa_first)
++                {
++                    sst = allocate_virtual_memory( ret, size_ptr, type, protect, 0x7400000000ULL, 0x7c00000000ULL, 0, 0 );
++                    if (sst) { *ret = saved; *size_ptr = want; }
++                }
++                if (sst)
++                    sst = allocate_virtual_memory( ret, size_ptr, type, protect,
++                                                   ios_steer_slot,
++                                                   (ULONG_PTR)host_addr_space_limit,
++                                                   0, 0 );
+                 /* ml171: 16GB is not enough. Surviving longer spawns more threads, so
+                  * the reserve count went 27 -> 55 (28160MB) and BOTH the steer slot and
+                  * furniture reported va-scan FAILED maxgap=0 before the NULL deref.

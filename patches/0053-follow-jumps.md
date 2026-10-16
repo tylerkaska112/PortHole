@@ -1,0 +1,9 @@
+# 0053 - dump the jump-linked blocks around a hot thread's dispatcher entry (diagnostic)
+
+0.50.96 showed the loop's dispatcher entry (`rip=0x705ba7fa8d`, RBP=...c540, same registers every sample) and that the function is a GetProcAddress-style export walk (`mov edi,[r15+0x88]; add rdi,r13; mov ebx,[rdi+0x20]; add rbx,r13; mov r12d,[rdi+0x1c]; ... cmp byte [rsi],'#'`), but its blocks are joined by `jmp rel32` to far addresses. `server_ios.c`: once per run, from the entry, breadth first over `e9 rel32` / `0f 8x rel32` targets within +-1 GB (the first run used 96 MB and found nothing: the first jump is 436 MB away): `[thread-regs] 0053 block <addr>: <96 bytes>` (up to 160 blocks). Each block starts at an instruction boundary, so it can be disassembled offline.
+
+**0067 (0.50.112).** The block walk now also follows `call rel32` (the guard routine the trampoline calls) and goes up to 500 blocks (queue 600).
+
+**0068 (0.50.113).** The executable is encrypted on disk (BlackOps3.exe, 106 MB: the resolver constants `0x100000001b3` and the seeds are NOT in the file) and decrypts itself at start, so offline analysis needs the running process. After the sixth hot sample `ios_dump_process_for_analysis` writes `Documents/bo3-dump/`: `meta.txt` (rip, rsp, TEB, image base, guest registers g0-g15 in x86 order, sections), `sec-<va>-<name>.bin` for every section (a section over 64 MB - the huge .data - only its first 4 MB), `headers.bin`, `stack.bin` (RSP-0x1000 to the stack base), `teb.bin`, `peb.bin`. About 100 MB; the folder can be deleted afterwards.
+
+**0.50.114.** The first dump (0.50.113) listed only 10 of the 11 sections (the header buffer was 0x400 bytes): the second `.text` (RVA 0x1aa6b000, 47 MB), where the hot loop jumps to (`jmp 0x70687bcf3d` = RVA 0x1bbacf3d), was missing. The header buffer is 0x1000 now and the folder is `bo3-dump2`.

@@ -1,0 +1,32 @@
+--- a/server/event.c
++++ b/server/event.c
+@@ -74,7 +74,13 @@
+         int on = e && (!strcmp( e, "1" ) || !strcmp( e, "on" ) || !strcmp( e, "yes" ) ||
+                        !strcmp( e, "auto" ) || !strcmp( e, "cells" ));
+ 
++        /* 0139: Porthole starts this server BEFORE it exports MADEIRA_FASTSYNC (and the game's MADEIRA_FASTSYNC_SEM) for the game's process. Deciding on the
++         * first call, with the variable not there yet, switched the cells off for the whole session: every client got "no cell" for every object. Not
++         * set yet is "not decided"; the decision is made once the variable exists. */
++        if (!e) return 0;
+         madeira_fastsync_on = on && get_inproc_device_fd() < 0;
++        fprintf( stderr, "[fastsync] server: cells %s (MADEIRA_FASTSYNC=%s, madsync %s)\n", madeira_fastsync_on ? "ON" : "off", e,
++                 get_inproc_device_fd() >= 0 ? "owns the session" : "off" );
+     }
+     return madeira_fastsync_on;
+ }
+@@ -83,12 +89,14 @@
+  * semaphore gets no cell and stays the upstream server object. */
+ int madeira_fastsync_sem_enabled(void)
+ {
++    if (!madeira_fastsync_enabled()) return 0;   /* 0139: decide only once the variables are there (see madeira_fastsync_enabled) */
+     if (madeira_fastsync_sem_on < 0)
+     {
+         const char *e = getenv( "MADEIRA_FASTSYNC_SEM" );
+         madeira_fastsync_sem_on = e && (!strcmp( e, "1" ) || !strcmp( e, "on" ) || !strcmp( e, "yes" ));
++        fprintf( stderr, "[fastsync] server: semaphore cells %s (MADEIRA_FASTSYNC_SEM=%s)\n", madeira_fastsync_sem_on ? "ON" : "off", e ? e : "unset" );
+     }
+-    return madeira_fastsync_sem_on && madeira_fastsync_enabled();
++    return madeira_fastsync_sem_on;
+ }
+ 
+ /* Whether any cell can exist in this session (thread.c's timeout re-check). */

@@ -1,0 +1,45 @@
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -9851,6 +9851,42 @@
+                                     (void*)(uintptr_t)frame_r[0xb8/8],
+                                     (void*)frame_r,
+                                     frame_r[0xb0/8] ? "" : "  <== callret_sp is ZERO (#42 trigger)");
++                                /* Porthole 0036 (diagnostic): the GUEST registers at the fault, and what the pointer registers point at as
++                                 * text and as 8 qwords. CS2 dies in embree3.dll+0x1bec, a helper that measures a string (rdx) and writes it to a
++                                 * C++ stream (rcx) whose first qword is null; this shows the message and the object. Guest memory is host
++                                 * memory in an ARM64EC process; mach_vm_read_overwrite cannot fault. */
++                                {
++                                    static const int pregs[] = { 2, 1, 6, 7, 8, 9 };
++                                    static const char *const pn[] = { "RDX", "RCX", "RSI", "RDI", "R8", "R9" };
++                                    unsigned pi;
++                                    ERR("  [av-regs] guest rip=%p RAX=%llx RCX=%llx RDX=%llx RBX=%llx RSP=%llx RBP=%llx RSI=%llx RDI=%llx R8=%llx R9=%llx R12=%llx\n",
++                                        (void*)(uintptr_t)frame_r[0x18/8],
++                                        (unsigned long long)frame_r[0x20/8], (unsigned long long)frame_r[0x28/8], (unsigned long long)frame_r[0x30/8],
++                                        (unsigned long long)frame_r[0x38/8], (unsigned long long)frame_r[0x40/8], (unsigned long long)frame_r[0x48/8],
++                                        (unsigned long long)frame_r[0x50/8], (unsigned long long)frame_r[0x58/8], (unsigned long long)frame_r[0x60/8],
++                                        (unsigned long long)frame_r[0x68/8], (unsigned long long)frame_r[0x80/8] );
++                                    for (pi = 0; pi < 6; pi++)
++                                    {
++                                        uint64_t v = frame_r[(0x20 + 8 * pregs[pi]) / 8];
++                                        unsigned char mem[96];
++                                        mach_vm_size_t got = 0;
++                                        if (v < 0x10000 || v >= 0x800000000000ull) continue;
++                                        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)v, sizeof(mem),
++                                                                    (mach_vm_address_t)mem, &got ) != KERN_SUCCESS || got < 8)
++                                        {
++                                            ERR("  [av-mem] %s=%llx unreadable\n", pn[pi], (unsigned long long)v);
++                                            continue;
++                                        }
++                                        {
++                                            char txt[97]; unsigned k, n = got > 96 ? 96 : (unsigned)got;
++                                            for (k = 0; k < n; k++) txt[k] = (mem[k] >= 32 && mem[k] < 127) ? (char)mem[k] : '.';
++                                            txt[n] = 0;
++                                            ERR("  [av-mem] %s=%llx \"%s\" | %016llx %016llx %016llx %016llx\n", pn[pi], (unsigned long long)v, txt,
++                                                (unsigned long long)((uint64_t *)mem)[0], (unsigned long long)((uint64_t *)mem)[1],
++                                                (unsigned long long)((uint64_t *)mem)[2], (unsigned long long)((uint64_t *)mem)[3] );
++                                        }
++                                    }
++                                }
+                             }
+                         }
+                     }

@@ -1,0 +1,19 @@
+diff -ruN a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-15 04:06:31
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-15 04:06:31
+@@ -24654,8 +24654,13 @@
+                 {
+                     const char *pe = getenv( "MADEIRA_CAGE_RELEASE" );
+                     const char *off = getenv( "MADEIRA_STEER_PA_FIRST" );
+-                    steer_pa_first = pe && *pe == '1' && !(off && *off == '0') && !ios_pa32_soft_enabled();   /* 0105: with the 32GB pool kept free, [0x7800000000,+32GB) is not for steered reserves */
+-                    if (steer_pa_first) dprintf( 2, "[steer] 0077 steered reserves go to [0x7400000000,0x7c00000000) first; the emulator band keeps its space\n" );
++                    /* 0146: MADEIRA_STEER_PA_FIRST=1 turns it on without the Dock session (a game started directly has nothing in Chromium's pool range either). Subnautica, 2026-10-15:
++                     * 21 reserves of 511 MB (10.7 GB, 13 % ever committed) went into the emulator band and a new thread could not get its 16 MB aligned call/return stack
++                     * (`THREADSTATE ALLOC FAILED ... emulator address band is exhausted`, STATUS_NO_MEMORY, the loading screen froze) while [0x7400000000,0x7c00000000) was empty. */
++                    int forced = off && *off == '1';
++                    steer_pa_first = ((pe && *pe == '1' && !(off && *off == '0')) || forced) && !ios_pa32_soft_enabled();   /* 0105: with the 32GB pool kept free, [0x7800000000,+32GB) is not for steered reserves */
++                    if (steer_pa_first) dprintf( 2, "[steer] 0077 steered reserves go to [0x7400000000,0x7c00000000) first; the emulator band keeps its space%s\n", forced ? " (MADEIRA_STEER_PA_FIRST=1)" : "" );
++                    else if (forced) dprintf( 2, "[steer] MADEIRA_STEER_PA_FIRST=1 ignored: the 32 GB pool switch (pa32-soft) owns that range\n" );
+                 }
+                 if (steer_pa_first)
+                 {

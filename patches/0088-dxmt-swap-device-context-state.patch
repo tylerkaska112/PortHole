@@ -1,0 +1,29 @@
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -2042,7 +2042,17 @@
+   void
+   STDMETHODCALLTYPE
+   SwapDeviceContextState(ID3DDeviceContextState *pState, ID3DDeviceContextState **ppPreviousState) override {
+-    IMPLEMENT_ME
++    /* Porthole 0088: was IMPLEMENT_ME, which logs and abort()s. Rockstar's launcher calls this once at start-up, after CreateDeviceContextState, to
++     * put its device in the D3D11.1 mode; with nothing but the swap itself to answer, the whole process died (exit code 3). The pipeline state is not
++     * saved or restored (MTLD3D11DeviceContextState holds nothing), but the contract is kept: the state handed in becomes the current one, and the
++     * state that was current comes back in ppPreviousState (a fresh object the first time, the default state of a real context). */
++    std::lock_guard<mutex_t> lock(mutex);
++    if (ppPreviousState) {
++      if (!swapped_state_)
++        swapped_state_ = new MTLD3D11DeviceContextState(device);
++      *ppPreviousState = swapped_state_.ref();
++    }
++    swapped_state_ = pState;
+   }
+ 
+   void
+@@ -5425,6 +5435,7 @@
+ 
+ protected:
+   D3D11ContextState state_;
++  Com<ID3DDeviceContextState> swapped_state_;   /* 0088: the state last given to SwapDeviceContextState */
+   D3D11UserDefinedAnnotation annotation_;
+   MTLD3D11ContextExt<ContextInternalState> ext_;
+   uint64_t max_object_threadgroups_;

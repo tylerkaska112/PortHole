@@ -1,0 +1,20 @@
+--- a/app/Runtime/StikJITHelper.swift	2026-09-30 23:44:51
++++ b/app/Runtime/StikJITHelper.swift	2026-09-30 23:44:51
+@@ -332,7 +332,16 @@
+             // held, the placeholder's run merged with the free space below it and
+             // the old test plugged the only hole that fit (every launch of ml1095
+             // ended in the guest window). Plug only holes ending below the placeholder.
+-            if earlyPoolBase != 0 && windowHeld {
++            // f4-0003: plug lower holes ONLY when the pool fits in a hole above the window. If the pool was sized from a LOWER hole (the biggest hole
++            // can be below the window), plugging every lower hole >= poolSize closes the pool's only valid landing site: first-fit then falls through
++            // to the guest window (0x7000000000) and fails three times ("BAD POOL ... guest 64G window"). A pool that only fits below the window
++            // is valid there (below 0x140000000, above 0x119000000), so leave that hole open.
++            let windowEnd = exeWinBase + exeWinSize
++            let aboveFit = holes.filter { $0.base >= windowEnd }.map { $0.size }.max() ?? 0
++            if earlyPoolBase != 0 && windowHeld && vm_address_t(poolSize) > aboveFit {
++                LogStore.shared.log("f4-0003: the \(poolSize >> 20)MB pool only fits below the window (largest hole above it: \(aboveFit >> 20)MB); not plugging lower holes")
++            }
++            if earlyPoolBase != 0 && windowHeld && vm_address_t(poolSize) <= aboveFit {
+                 for h in holes where h.base + h.size <= earlyPoolBase && h.size >= vm_address_t(poolSize) {
+                     var a = h.base
+                     if vm_allocate(mach_task_self_, &a, vm_size_t(h.size), 0 /* FIXED */) == KERN_SUCCESS && a == h.base {

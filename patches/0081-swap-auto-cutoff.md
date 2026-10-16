@@ -1,0 +1,9 @@
+# 0081 swap tier: the cut-off drops when the app's memory gets tight (opt-in)
+
+`virtual_ios.c` (`ios_swap_floor`, used where `ios_swap_min` was compared in `ios_swap_eligible`, `ios_swap_why` and the broad reservation test). Rebuilt with `tools/rebuild_ntdll_object.sh virtual`, installed over `vendor/Madeira/app/Madeira/libntdll_unix.a`.
+
+Why (Sons of the Forest, 2026-10-07, five runs, load measured as the time to create N textures): Wide (1 MB+) loads slowly (8,000 textures at ~970-1160 s) at ~3 GB; Large (8 MB) and 6 MB load twice as fast (~630-780 s) because Unity's hot 4 MB heap blocks stay in RAM, but cost ~2.3 GB more (5.2 GB at 4 minutes) and the app reaches iOS's 6.1 GB limit at about the end of the load (killed at 659, 791 and 822 s, last line `Failed to mprotect last page of code buffer`); 4 MB puts those blocks in the file (2.9 GB) and is as slow as Wide after the first 90 s. The memory is a cliff between 4 and 6 MB, not a slope.
+
+What: `MADEIRA_SWAP_AUTO_AT_MB = N` (>= 512). The cut-off stays at its normal value (swap-min-mb, 8 MB) until the footprint (`ios_last_footprint_mb`, the pool warmer's 250 ms figure, as 0079 uses) reaches N, then drops to `MADEIRA_SWAP_AUTO_MIN_KB` (default 1024) for every commit from then on; earlier allocations stay where they are; one way. Logs `[swap] 0081 auto cut-off: ...` at the start and when it trips. Unset: nothing changes. Works in classic coverage (the blocks and broad tests use the same function); the FEX-arena auto mode of 0079 still needs Wide.
+
+Try: Swap covers = Large (8 MB+), JIT pool 512, and on the game's lines `env.MADEIRA_SWAP_AUTO_AT_MB = 4800`. Good looks like: loading as fast as the 8 MB runs (3,000 textures by ~60 s, 5,000 by ~150 s), the trip line near 4.8 GB, and the footprint staying under ~5.6 GB through the world. Not verified on a device.

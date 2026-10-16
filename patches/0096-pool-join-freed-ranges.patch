@@ -1,0 +1,92 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -231,6 +231,7 @@
+     size_t size;
+     time_t freed_at;
+     int    advised;   /* physical pages returned via MADV_FREE (post-grace) */
++    int    split;     /* 0093/0096: already through the 60 s quarantine of a split (so a join that is split again waits no longer) */
+ };
+ static struct ios_pool_free ios_pool_freelist[IOS_POOL_FREE_MAX];
+ static int ios_pool_free_count;
+@@ -2410,6 +2411,40 @@
+          * RAM pressure blamed for StikDebug dying (the freeze/detach); that
+          * symptom may have been this corruption all along. */
+         ios_pool_freelist[i].advised = 1;
++    }
++
++    /* Porthole 0096: freed ranges that touch are one range. Images are freed one by one, so two neighbours stayed two entries, and a 6 MB request
++     * (socialclub.dll) failed with `EXHAUSTED ... freelist=256` while several megabytes lay free in pieces. Only ranges past their grace (and, for the
++     * split runs of 0093, their quarantine) are joined, so nothing waiting for its grace is released earlier. A joined range that contains a poisoned
++     * page is split again where it is examined below. */
++    if (ios_pool_free_count > 1)
++    {
++        int a2, b2, merged = 0;
++        for (a2 = 1; a2 < ios_pool_free_count; a2++)   /* insertion sort by offset */
++        {
++            struct ios_pool_free key = ios_pool_freelist[a2];
++            b2 = a2 - 1;
++            while (b2 >= 0 && ios_pool_freelist[b2].off > key.off) { ios_pool_freelist[b2 + 1] = ios_pool_freelist[b2]; b2--; }
++            ios_pool_freelist[b2 + 1] = key;
++        }
++        for (a2 = 0; a2 + 1 < ios_pool_free_count; )
++        {
++            struct ios_pool_free *x = &ios_pool_freelist[a2], *y = &ios_pool_freelist[a2 + 1];
++            if (x->off + x->size == y->off &&
++                now - x->freed_at >= IOS_POOL_REUSE_GRACE_SEC && now - y->freed_at >= IOS_POOL_REUSE_GRACE_SEC)
++            {
++                x->size += y->size;
++                if (y->freed_at > x->freed_at) x->freed_at = y->freed_at;
++                x->advised = x->advised && y->advised;
++                x->split = x->split && y->split;
++                for (b2 = a2 + 1; b2 + 1 < ios_pool_free_count; b2++) ios_pool_freelist[b2] = ios_pool_freelist[b2 + 1];
++                ios_pool_free_count--;
++                merged++;
++            }
++            else a2++;
++        }
++        if (merged)
++            dprintf(2, "[jit-pool] 0096 joined %d touching freed range(s); freelist now %d\n", merged, ios_pool_free_count);
+     }
+ 
+     for (i = 0; i < ios_pool_free_count; i++)
+@@ -2437,7 +2472,7 @@
+                     int in_run = 0, n_runs = 0;
+                     /* The threads of a process that exited can run on for a while (a killed thread only dies at its next server request: one came back 1-2 s after
+                      * its process was reclaimed and called into the ntdll copy a split run had been handed to: ILL). Runs wait IOS_POOL_RUN_QUARANTINE_SEC longer than the usual grace. */
+-                    time_t f_at = ios_pool_freelist[i].freed_at + IOS_POOL_RUN_QUARANTINE_SEC;
++                    time_t f_at = ios_pool_freelist[i].freed_at + (ios_pool_freelist[i].split ? 0 : IOS_POOL_RUN_QUARANTINE_SEC);
+                     int slot = i;
+                     unsigned int c2, m2;
+                     dprintf(2, "[jit-pool] POISONED range off=0x%lx size=0x%lx cur=0x%x max=0x%x — splitting off its executable runs (0093)\n",
+@@ -2452,13 +2487,14 @@
+                             in_run = 0;
+                             if (len >= IOS_POOL_RUN_MIN)
+                             {
+-                                if (slot >= 0) { ios_pool_freelist[slot].off = f_off + run_start; ios_pool_freelist[slot].size = len; ios_pool_freelist[slot].freed_at = f_at; slot = -1; }
++                                if (slot >= 0) { ios_pool_freelist[slot].off = f_off + run_start; ios_pool_freelist[slot].size = len; ios_pool_freelist[slot].freed_at = f_at; ios_pool_freelist[slot].split = 1; slot = -1; }
+                                 else if (ios_pool_free_count < IOS_POOL_FREE_MAX)
+                                 {
+                                     ios_pool_freelist[ios_pool_free_count].off = f_off + run_start;
+                                     ios_pool_freelist[ios_pool_free_count].size = len;
+                                     ios_pool_freelist[ios_pool_free_count].freed_at = f_at;
+                                     ios_pool_freelist[ios_pool_free_count].advised = 1;
++                                    ios_pool_freelist[ios_pool_free_count].split = 1;
+                                     ios_pool_free_count++;
+                                 }
+                                 else continue;
+@@ -10497,6 +10533,7 @@
+              * execute this range during the grace window, and a purged
+              * page reads zero). */
+             ios_pool_freelist[ios_pool_free_count].advised = 0;
++            ios_pool_freelist[ios_pool_free_count].split = 0;
+             ios_pool_free_count++;
+             total += size;
+             ranges++;
+@@ -11328,6 +11365,7 @@
+     ios_pool_freelist[ios_pool_free_count].size = size;
+     ios_pool_freelist[ios_pool_free_count].freed_at = time( NULL );
+     ios_pool_freelist[ios_pool_free_count].advised = 0;
++    ios_pool_freelist[ios_pool_free_count].split = 0;
+     ios_pool_free_count++;
+     ios_pool_ledger[i] = ios_pool_ledger[--ios_pool_ledger_count];
+     return size;

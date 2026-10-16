@@ -1,0 +1,11 @@
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -12694,7 +12694,7 @@
+     optsize = *(const unsigned short *)(b + pe_off + 0x14);
+     hdr_size = *(const unsigned int *)(opt + 0x3C);
+     sect = opt + optsize;
+-    if (!nsec || nsec > 96 || hdr_size > 0x4000 || sect + nsec * 40 > b + hdr_size) return image_size;
++    if (!nsec || nsec > 96 || hdr_size > 0x20000 ||   /* 0097: Wine's DLLs have 64 KB of headers, which 0095 refused: nothing but the 3 MSVC programs was cut */  sect + nsec * 40 > b + hdr_size) return image_size;
+     rsrc_rva = *(const unsigned int *)(opt + 0x70 + 2 * 8);
+     {
+         static int shown;

@@ -1,0 +1,45 @@
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -3517,6 +3517,42 @@
+                     {
+                         int rt = insn & 0x1f;
+                         *(uint16_t *)rw_addr = (uint16_t)IOS_STORE_SRC(rt);
++                        emulated = 1;
++                    }
++                    /* Porthole 0013: SIMD/FP stores of the other shapes. FEX emits these for 32-bit (WoW64) guests, which address memory as
++                     * [xN, wM, uxtw]: a 32-bit game (Assetto Corsa) writing a 128-bit value into a page it just made executable crashed at startup
++                     * with "[store-undecoded] insn=0x3cb84a70" = `str q16, [x19, w24, uxtw]`. As for the other forms, fault_addr is the final
++                     * address, so only the size and the source register matter.
++                     *   STR (register) B/H/S/D/Q:  size 111 1 00 opc 1 Rm option S 10 Rn Rt   (Q is size=00 opc=10)
++                     *   STUR (unscaled) B/H/S/D:   size 111 1 00 00 0 imm9 00 Rn Rt          (Q was already handled above) */
++                    else if (have_neon &&
++                             ((insn & 0xffe00c00) == 0x3ca00800 || (insn & 0xffe00c00) == 0xfc200800 || (insn & 0xffe00c00) == 0xbc200800 ||
++                              (insn & 0xffe00c00) == 0x7c200800 || (insn & 0xffe00c00) == 0x3c200800 ||
++                              (insn & 0xffe00c00) == 0xfc000000 || (insn & 0xffe00c00) == 0xbc000000 ||
++                              (insn & 0xffe00c00) == 0x7c000000 || (insn & 0xffe00c00) == 0x3c000000))
++                    {
++                        int rt = insn & 0x1f;
++                        unsigned shape = ((insn >> 30) & 3) | (((insn >> 23) & 1) << 2);      /* 0=B 1=H 2=S 3=D 4=Q */
++                        memcpy((void *)rw_addr, &neon_state.__v[rt], 1u << shape);
++                        emulated = 1;
++                    }
++                    /* Porthole 0013: STP / STNP of two SIMD/FP registers (S, D or Q): opc 101 1 0 type Rt2 Rn Rt, L=0.
++                     * type 10 = signed offset, 11 = pre-index, 01 = post-index (both write the new base back), 00 = non-temporal.
++                     * A write-back to SP is left to the undecoded path rather than guessed at. */
++                    else if (have_neon && (insn & 0x3e400000) == 0x2c000000 && ((insn >> 30) & 3) != 3 &&
++                             !((((insn >> 23) & 3) == 1 || ((insn >> 23) & 3) == 3) && ((insn >> 5) & 0x1f) == 31))
++                    {
++                        int rt = insn & 0x1f, rt2 = (insn >> 10) & 0x1f, rn = (insn >> 5) & 0x1f;
++                        unsigned bytes = 4u << ((insn >> 30) & 3);                              /* S=4 D=8 Q=16 */
++                        int type = (insn >> 23) & 3;
++                        memcpy((void *)rw_addr, &neon_state.__v[rt], bytes);
++                        memcpy((void *)(rw_addr + bytes), &neon_state.__v[rt2], bytes);
++                        if (type == 1 || type == 3)
++                        {
++                            int imm7 = (insn >> 15) & 0x7f;
++                            if (imm7 & 0x40) imm7 |= ~0x7f;
++                            state.__x[rn] = (uint64_t)((int64_t)state.__x[rn] + (int64_t)imm7 * bytes);
++                        }
+                         emulated = 1;
+                     }
+                     

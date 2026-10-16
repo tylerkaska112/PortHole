@@ -1,0 +1,45 @@
+--- a/app/Runtime/StikJITHelper.swift
++++ b/app/Runtime/StikJITHelper.swift
+@@ -4,6 +4,9 @@
+ /// Opens StikDebug with Madeira's bundled script, polls for CS_DEBUGGED,
+ /// then allocates JIT memory and detaches the debugger.
+ enum StikJITHelper {
++    /// Porthole 0016: when set, the 128 MB executable window at 0x140000000 is given back before the pool is placed (the text is the reason, for the log). SessionController sets it
++    /// only when every program of the game can be moved in memory (see ExecutableWindow.swift); nil keeps the window, which is the previous behaviour.
++    static var releaseExeWindowReason: String? = nil
+ 
+     // madeira-jit.js in Copy Bundle Resources is the only script source.
+ 
+@@ -274,8 +277,9 @@
+         // against ends at +117MB; ntdll hands the window to the first fixed map
+         // of >=64MB that fits, and reads the size from WINE_IOS_EXE_WINDOW.
+         let exeWinSize: vm_address_t = 0x8000000           // 128MB
++        var windowReleased = false          // Porthole 0016: true once the window was given back on purpose; then a pool may cover 0x140000000
+         func overlapsExeWindow(_ base: vm_address_t, _ len: vm_address_t) -> Bool {
+-            return base < exeWinBase + exeWinSize && base + len > exeWinBase
++            return !windowReleased && base < exeWinBase + exeWinSize && base + len > exeWinBase
+         }
+         let skipWindow = (ProcessInfo.processInfo.environment["MADEIRA_NO_EXE_WINDOW"].map { $0 != "0" } ?? false)
+         var windowHeld = false
+@@ -330,6 +334,21 @@
+             }
+         }
+ 
++        // Porthole 0016: every program of this game can be moved in memory, so the reserved window protects nothing and splits the only band the pool may use.
++        // Give it back; the hole below and the hole above it join and a 896 MB pool fits. Anything else keeps the window exactly as before.
++        if windowHeld, let reason = releaseExeWindowReason {
++            let kr = vm_deallocate(mach_task_self_, exeWinBase, vm_size_t(exeWinSize))
++            if kr == KERN_SUCCESS {
++                windowHeld = false; windowReleased = true
++                unsetenv("WINE_IOS_EXE_WINDOW")
++                LogStore.shared.log("0016: gave back the executable window [0x140000000,+128MB) for a larger pool: \(reason)", level: .success)
++            } else {
++                LogStore.shared.log("0016: could not give back the executable window (kr=\(kr)); keeping it", level: .error)
++            }
++        } else if windowHeld {
++            LogStore.shared.log("0016: keeping the executable window [0x140000000,+128MB)" + (releaseExeWindowReason == nil ? " (see the [exe-window] line above)" : ""))
++        }
++
+         let goodLow = 0x119000000
+         let guestLo = 0x7000000000
+         let guestHi = 0x8000000000

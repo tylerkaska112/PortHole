@@ -1,0 +1,73 @@
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-12 00:10:00
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-12 00:10:00
+@@ -1719,6 +1719,45 @@
+         return STATUS_SUCCESS;
+     }
+     return STATUS_NO_MEMORY;
++}
++
++/* 0113: V8's sandbox (RDR2 renderer thread, 0.50.226 log) asks for 1.3 TB, 512, 256, ... 16 GB and finally 8 GB, each with a hint and again without; 8 GB is its
++ * minimum and refusing that too ends in Chrome's out-of-memory exception (0xe0000008). The 8 GB ask is answered with the top of the real 32 GB view at
++ * 0x7800000000 (4GB-aligned as V8 wants), which is reserved and, so far, uncommitted. Only the 8 GB step: a bigger partial reservation would let V8 place
++ * array buffers anywhere in it. */
++static NTSTATUS ios_pa32_sandbox_grant( void **ret )
++{
++    unsigned i;
++
++    if (!find_view( (const void *)0x7e00000000ULL, 0x1000 )) return STATUS_NO_MEMORY;
++    for (i = 0; i < ios_bigres_cnt; i++)
++        if (ios_bigres_tab[i].base == 0x7800000000ULL && ios_bigres_tab[i].committed >= 0x10000000ULL) return STATUS_NO_MEMORY;
++    *ret = (void *)0x7e00000000ULL;
++    return STATUS_SUCCESS;
++}
++
++/* 0113: the same ask arriving through NtAllocateVirtualMemoryEx is a PLACEHOLDER reservation (V8 splits it with MEM_PRESERVE_PLACEHOLDER and fills it with
++ * MEM_REPLACE_PLACEHOLDER), which has to be a view of its own. The idle 32GB view is released, its lower 24 GB are reserved again for whoever holds it, and
++ * the top 8 GB become the placeholder. Whoever committed there afterwards gets STATUS_CONFLICTING_ADDRESSES instead of silently sharing pages. */
++static NTSTATUS ios_pa32_sandbox_carve( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect, ULONG attributes )
++{
++    unsigned i;
++    void *xb = (void *)0x7800000000ULL, *lb = (void *)0x7800000000ULL;
++    SIZE_T xs = 0, ls = 0x600000000ULL, want = *size_ptr;
++    NTSTATUS fst, rst, st;
++
++    if (!find_view( (const void *)0x7e00000000ULL, 0x1000 )) return STATUS_NO_MEMORY;
++    for (i = 0; i < ios_bigres_cnt; i++)
++        if (ios_bigres_tab[i].base == 0x7800000000ULL && ios_bigres_tab[i].committed >= 0x10000000ULL) return STATUS_NO_MEMORY;
++    fst = NtFreeVirtualMemory( NtCurrentProcess(), &xb, &xs, MEM_RELEASE );
++    if (fst) { dprintf( 2, "[pa32] patch0113 release of the idle view refused: 0x%x\n", (unsigned)fst ); return STATUS_NO_MEMORY; }
++    rst = allocate_virtual_memory( &lb, &ls, MEM_RESERVE, PAGE_NOACCESS, 0, 0, 0, 0 );
++    *ret = (void *)0x7e00000000ULL;
++    *size_ptr = want;
++    st = allocate_virtual_memory( ret, size_ptr, type, protect, 0, 0, 0, attributes );
++    dprintf( 2, "[pa32] patch0113 sandbox placeholder: lower 24GB of the idle view again st=0x%x, 0x%llx+0x%llx at the top st=0x%x\n",
++             (unsigned)rst, 0x7e00000000ULL, (unsigned long long)want, (unsigned)st );
++    return st;
+ }
+ 
+ static void ios_bigres_commit( void *addr, size_t size )
+@@ -23423,6 +23462,15 @@
+              * pre-attempt and let the hinted-retry slot walk below do the
+              * work. Probe the map when we come up short. */
+             st = allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
++            if (st && *size_ptr == 0x200000000ULL && ios_pa32_soft_enabled())
++            {
++                void *sb = NULL;
++                if (ios_pa32_sandbox_grant( &sb ) == STATUS_SUCCESS)
++                {
++                    *ret = sb; st = STATUS_SUCCESS;
++                    dprintf( 2, "[pa32] patch0113 8 GB ask (V8's smallest sandbox) served from the top of the idle real view at %p\n", sb );
++                }
++            }
+             if (st)
+             {
+                 static int probed;
+@@ -25221,6 +25269,8 @@
+         st = allocate_virtual_memory( ret, size_ptr, type, protect,
+                                       limit_low, limit_high, align, attributes );
+ 
++        if (st && is_jumbo && jumbo_size == 0x200000000ULL && (type & MEM_RESERVE) && process == NtCurrentProcess() && ios_pa32_soft_enabled())
++            st = ios_pa32_sandbox_carve( ret, size_ptr, type, protect, attributes );   /* 0113 */
+         if (st && is_jumbo) st = ios_pa32_cage_grant( process, ret, size_ptr, jumbo_size, type, protect );   /* patch 0018 */
+         if (is_jumbo) ios_jumbo_census( jumbo_hint, jumbo_size, st ? NULL : *ret, (unsigned)st );
+         if (!st && *size_ptr >= 0x10000000 && *size_ptr < 0x40000000 && (type & MEM_RESERVE))

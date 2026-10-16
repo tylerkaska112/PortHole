@@ -1,0 +1,152 @@
+diff --git a/build/ntdll-unix/process_ios.c b/build/ntdll-unix/process_ios.c
+index 0e1d438..e224c69 100644
+--- a/build/ntdll-unix/process_ios.c
++++ b/build/ntdll-unix/process_ios.c
+@@ -1571,6 +1571,147 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
+             }
+         }
+     }
++
++    /* Porthole 0030: Ubisoft Connect's client is a Chromium (CEF) application, like steamwebhelper. upc.exe is the browser;
++     * UplayWebCore.exe is the helper it starts again for the GPU, renderer, network and crash-handler processes (--type=...).
++     * Every 32-bit process takes one of the very few 4 GB guest-window slots and its own JIT-pool code buffer, and Far Cry 6's
++     * launch needs the client alive: with the helpers the log shows `guest window reserve returned 0xc0000017` (out of slots),
++     * `JIT pool exhausted` and a blank white client window. Same remedy as for steamwebhelper above: run the browser in
++     * Chromium's single-process mode (renderer, network and GPU as threads, software rendering) and refuse the helpers.
++     * MADEIRA_UPC_SINGLE_PROCESS=1 turns the injection and the refusal ON (0.50.66 had them on: Ubisoft's CEF ignored the
++     * switches, kept starting its helpers, and with the graphics helper refused Chromium ended itself with `FATAL:
++     * gpu_data_manager_impl_private.cc(415) GPU process isn't usable`). The command lines are logged either way. */
++    {
++        const char *sp_env = getenv( "MADEIRA_UPC_SINGLE_PROCESS" );
++        int gate_on = sp_env && sp_env[0] == '1';     /* 0.50.67: OFF by default, see below */
++        {
++            const WCHAR *ip = params->ImagePathName.Buffer;
++            int ip_len = params->ImagePathName.Length / sizeof(WCHAR);
++            const WCHAR *cl = params->CommandLine.Buffer;
++            int cl_len = params->CommandLine.Length / sizeof(WCHAR);
++            static const char upc_name[] = "\\upc.exe", web_name[] = "\\uplaywebcore.exe";
++            static const char typesw[] = "--type=", singlesw[] = "--single-process";
++            int is_upc = 0, is_web = 0, has_type = 0, has_single = 0, k, j;
++            int ul = sizeof(upc_name) - 1, wl = sizeof(web_name) - 1;
++
++            for (k = 0; k + ul <= ip_len && !is_upc; k++)
++            {
++                if (k + ul != ip_len) continue;                       /* the name has to END the path */
++                for (j = 0; j < ul; j++)
++                {
++                    WCHAR c = ip[k + j];
++                    if (c >= 'A' && c <= 'Z') c += 32;
++                    if (c != (WCHAR)upc_name[j]) break;
++                }
++                if (j == ul) is_upc = 1;
++            }
++            for (k = 0; k + wl <= ip_len && !is_web; k++)
++            {
++                if (k + wl != ip_len) continue;
++                for (j = 0; j < wl; j++)
++                {
++                    WCHAR c = ip[k + j];
++                    if (c >= 'A' && c <= 'Z') c += 32;
++                    if (c != (WCHAR)web_name[j]) break;
++                }
++                if (j == wl) is_web = 1;
++            }
++            if (is_upc || is_web)
++            {
++                for (k = 0; k + 7 <= cl_len && !has_type; k++)
++                {
++                    for (j = 0; j < 7; j++) if (cl[k + j] != (WCHAR)typesw[j]) break;
++                    if (j == 7) has_type = 1;
++                }
++                for (k = 0; k + 16 <= cl_len && !has_single; k++)
++                {
++                    for (j = 0; j < 16; j++) if (cl[k + j] != (WCHAR)singlesw[j]) break;
++                    if (j == 16) has_single = 1;
++                }
++            }
++            if (is_upc || is_web)
++            {
++                /* the whole command line, 160 characters a line: the engine's own process log cuts it at ~220 */
++                char line[168];
++                int pos, li;
++                for (pos = 0; pos < cl_len && pos < 2400; pos += 160)
++                {
++                    for (li = 0; li < 160 && pos + li < cl_len; li++)
++                        line[li] = (cl[pos + li] >= 32 && cl[pos + li] < 127) ? (char)cl[pos + li] : '?';
++                    line[li] = 0;
++                    dprintf( 2, "[proc-gate] cmdline(%s)+%d: %s\n", is_upc ? "upc" : "webcore", pos, line );
++                }
++            }
++            /* UplayService.exe, started by upc.exe as `-upc_platform_mode 1 -uplayservice_perform_updates ...` and
++             * `... -uplayservice_set_app_user_model_id ...` (an updater and a taskbar-identity helper that talk back over a pipe).
++             * On Windows they are short-lived or run as a service; here nothing starts services, they stay alive and each holds one
++             * of the ~7 usable 32-bit guest-window slots, so the RENDERER of the client (the 8th 32-bit process: launcher, upc,
++             * 2 x UplayService, gpu, network, storage) failed with `guest window reserve returned 0xc0000017` and the client
++             * window stayed a blank white box. Refused, like the helpers above; MADEIRA_UPC_SKIP_SERVICE=0 starts them. */
++            {
++                static const char svc_name[] = "\\uplayservice.exe";
++                static const char *const svc_modes[] = { "-uplayservice_perform_updates", "-uplayservice_set_app_user_model_id" };
++                const char *sk_env = getenv( "MADEIRA_UPC_SKIP_SERVICE" );
++                int sl = sizeof(svc_name) - 1, is_svc = 0, has_arg = 0;
++                if (!(sk_env && sk_env[0] == '0'))     /* 0.50.71: the two one-shot modes are refused by default again; MADEIRA_UPC_SKIP_SERVICE=0 starts them */
++                {
++                    for (k = 0; k + sl <= ip_len && !is_svc; k++)
++                    {
++                        if (k + sl != ip_len) continue;
++                        for (j = 0; j < sl; j++)
++                        {
++                            WCHAR c = ip[k + j];
++                            if (c >= 'A' && c <= 'Z') c += 32;
++                            if (c != (WCHAR)svc_name[j]) break;
++                        }
++                        if (j == sl) is_svc = 1;
++                    }
++                    if (is_svc)
++                    {
++                        /* only the one-shot modes: the service itself (no mode, `-uplayservice_pipe_path` only) is what the client
++                         * needs for its game starter, and "-uplayservice_" alone matched it too */
++                        int m;
++                        for (m = 0; m < 2 && !has_arg; m++)
++                        {
++                            int al = (int)strlen( svc_modes[m] );
++                            for (k = 0; k + al <= cl_len && !has_arg; k++)
++                            {
++                                for (j = 0; j < al; j++) if (cl[k + j] != (WCHAR)svc_modes[m][j]) break;
++                                if (j == al) has_arg = 1;
++                            }
++                        }
++                    }
++                    if (is_svc && has_arg)
++                    {
++                        dprintf( 2, "[proc-gate] REFUSING UplayService.exe -uplayservice_* (0032: it would hold a guest-window slot for ever)\n" );
++                        return STATUS_ACCESS_DENIED;
++                    }
++                }
++            }
++            if (gate_on && is_web && has_type)
++            {
++                dprintf( 2, "[proc-gate] REFUSING UplayWebCore --type= child (Ubisoft Connect runs single-process; 0030)\n" );
++                return STATUS_ACCESS_DENIED;
++            }
++            if (gate_on && is_upc && !has_single)
++            {
++                static const char add[] = " --single-process --disable-gpu --disable-gpu-compositing --enable-logging=file";
++                int al = sizeof(add) - 1, o = 0;
++                WCHAR *nbuf = malloc( (cl_len + al + 1) * sizeof(WCHAR) );
++                if (nbuf)
++                {
++                    memcpy( nbuf, cl, cl_len * sizeof(WCHAR) );
++                    o = cl_len;
++                    for (j = 0; j < al; j++) nbuf[o++] = (WCHAR)add[j];
++                    nbuf[o] = 0;
++                    params->CommandLine.Buffer = nbuf;
++                    params->CommandLine.Length = o * sizeof(WCHAR);
++                    params->CommandLine.MaximumLength = params->CommandLine.Length + sizeof(WCHAR);
++                    dprintf( 2, "[proc-gate] upc.exe: injected --single-process --disable-gpu (0030)\n" );
++                }
++            }
++        }
++    }
+ #endif
+ 
+     unixdir = get_unix_curdir( params );

@@ -1,0 +1,22 @@
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -3527,7 +3527,8 @@
+   if (g_fg.last_abs) {
+     double d = (double)(now - g_fg.last_abs) * tb.numer / tb.denom / 1e9;
+     if (d < 1.0 / 120.0) d = 1.0 / 120.0;
+-    if (d > 1.0 / 15.0) { d = 1.0 / 15.0; g_fg.have_prev = 0; }   /* a stall: no stale history */
++    /* 0138: a stall (no stale history) was anything over 66 ms, which cut a game running at 10-15 fps off from frame generation; now it is over 160 ms. */
++    if (d > 0.16) { d = 0.16; g_fg.have_prev = 0; }
+     g_fg.dt = g_fg.dt > 0 ? g_fg.dt * 0.8 + d * 0.2 : d;
+   }
+   g_fg.last_abs = now;
+@@ -3561,7 +3562,8 @@
+     [enc setTexture:g_fg.luma[ni] atIndex:1];
+     madeira_fg_dispatch(enc, g_fg.k_luma, g_fg.luma[ni].width, g_fg.luma[ni].height);
+     if (have_prev && gen_ok) {
+-      int radius = (int)madeira_fg_envf("MADEIRA_FRAMEGEN_RADIUS", 6.0f);
++      /* 0138: a slow game moves further between two frames: the search reaches 6 blocks (48 px) at 30 fps and above, 10 below 20 fps. */
++      int radius = (int)madeira_fg_envf("MADEIRA_FRAMEGEN_RADIUS", g_fg.dt > 0.05 ? 10.0f : 6.0f);
+       float scale = 8.0f * madeira_fg_envf("MADEIRA_FRAMEGEN_MVSIGN", 1.0f);
+       if (radius < 1) radius = 1;
+       if (radius > 16) radius = 16;

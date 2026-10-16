@@ -1,0 +1,20 @@
+--- a/app/Runtime/DockInstallers.swift
++++ b/app/Runtime/DockInstallers.swift
+@@ -386,9 +386,15 @@
+         // Porthole 0099: a prefix made without wine.inf never had wintrust.dll registered, so CryptDecodeObjectEx had no decoder for the Authenticode
+         // structures (1.3.6.1.4.1.311.2.1.4 and friends) and a program that checks the signature of its own libraries (Rockstar's launcher checking
+         // socialclub.dll) said "incomplete installation (1002)". Registering is idempotent and quick; it only runs with the service step.
++        // Porthole 0101: the same goes for everything else wine.inf registers when it makes a prefix (shell32 has CLSID_TaskbarList, which Rockstar's
++        // Social Club setup asks for: "class {56fdf344-fd6d-11d0-958a-006097c9a090} not registered", then it quits with exit code 0 having installed
++        // nothing). One regsvr32 for the lot, once (a marker file on drive C: says it was tried).
+         if services != .off {
+-            lines.append("C:\\windows\\system32\\regsvr32.exe /s wintrust.dll")
+-            lines.append("echo wintrust-registered %ERRORLEVEL%" + result)
++            lines.append("if exist C:\\madeira-com-registered.txt goto madeira_com_done")
++            lines.append("C:\\windows\\system32\\regsvr32.exe /s shell32.dll windowscodecs.dll urlmon.dll wintrust.dll cryptnet.dll")
++            lines.append("echo com-registered %ERRORLEVEL%" + result)
++            lines.append("echo tried> C:\\madeira-com-registered.txt")
++            lines.append(":madeira_com_done")
+         }
+         for (offset, process) in processes.enumerated() {
+             let index = offset + 1

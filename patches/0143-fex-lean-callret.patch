@@ -1,0 +1,286 @@
+diff -ruN a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -709,13 +709,23 @@
+     // writing the sentinel into JIT code memory.
+     {
+       ARMEmitter::ForwardLabel l_callret_ok;
+-      ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
+-      sub(ARMEmitter::Size::i64Bit, TMP1, REG_CALLRET_SP, TMP1);
+-      lsr(ARMEmitter::Size::i64Bit, TMP1, TMP1, 24);
+-      (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &l_callret_ok);
+-      ldr(REG_CALLRET_SP, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
+-      add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x400000);
+-      (void)Bind(&l_callret_ok);
++      static const bool LeanCallRet = [] { const char* E = getenv("MADEIRA_FEX_LEAN"); return !(E && E[0] == '0'); }();
++      if (LeanCallRet) {
++        /* 0.50.339: same bit test as Arm64JITCore::EmitCallRetGuard (the stack's base is 8MB-aligned). */
++        eor(ARMEmitter::Size::i64Bit, TMP1, REG_CALLRET_SP, REG_CALLRET_SP, ARMEmitter::ShiftType::LSR, 1);
++        (void)tbnz(TMP1, 21, &l_callret_ok);
++        and_(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, ~0x7FFFFFULL);
++        orr(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x400000ULL);
++        (void)Bind(&l_callret_ok);
++      } else {
++        ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
++        sub(ARMEmitter::Size::i64Bit, TMP1, REG_CALLRET_SP, TMP1);
++        lsr(ARMEmitter::Size::i64Bit, TMP1, TMP1, 24);
++        (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &l_callret_ok);
++        ldr(REG_CALLRET_SP, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
++        add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x400000);
++        (void)Bind(&l_callret_ok);
++      }
+     }
+ #endif
+ #ifndef FEX_CALLRET_STACK_UNUSED
+diff -ruN a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -19,6 +19,46 @@
+ 
+ namespace FEXCore::CPU {
+ 
++
++/* 0.50.339 (MADEIRA_FEX_LEAN=1): the call-ret stack guard in 2 instructions instead of 5-6.
++ *
++ * The stack is allowed to move inside a 4MB window, [base+2MB, base+6MB), and is put back at base+4MB when it leaves it. The old guard loaded
++ * State.callret_sp_base, added 2MB, subtracted, shifted and tested: an ldr and four ALU instructions on every guest CALL and RET. With the stack's base
++ * 8MB-aligned (CallRetStack::InitializeThread places it there now) the window is a pattern of the address itself: bits 22:21 of sp are 01 or 10 exactly
++ * inside it, so the test is `bit21 ^ bit22` -- one eor (x ^ x>>1) and one tbnz; the (rare) reset needs no load either: the 8MB block of the stack is sp rounded down.
++ * Without MADEIRA_FEX_LEAN the old sequence is emitted unchanged. */
++bool Arm64JITCore::LeanCallRetEnabled() {
++  static const bool Enabled = [] {
++    const char* E = getenv("MADEIRA_FEX_LEAN");
++    /* 0.50.341: on unless MADEIRA_FEX_LEAN=0. */
++    const bool On = !(E && E[0] == '0');
++    LogMan::Msg::EFmt("[lean] MADEIRA_FEX_LEAN={} -> lean call/return code {}", E ? E : "(unset)", On ? "ON" : "off");
++    return On;
++  }();
++  return Enabled;
++}
++
++void Arm64JITCore::EmitCallRetGuard(ARMEmitter::XRegister Tmp) {
++  ARMEmitter::ForwardLabel l_callret_ok;
++  if (LeanCallRetEnabled()) {
++    eor(ARMEmitter::Size::i64Bit, Tmp, REG_CALLRET_SP, REG_CALLRET_SP, ARMEmitter::ShiftType::LSR, 1);
++    (void)tbnz(Tmp, 21, &l_callret_ok);
++    and_(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, ~0x7FFFFFULL);
++    orr(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x400000ULL);
++    (void)Bind(&l_callret_ok);
++    return;
++  }
++  /* iOS-Madeira ml263: tightened to a 4MB window [base+2MB, base+6MB). */
++  ldr(Tmp, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
++  add(ARMEmitter::Size::i64Bit, Tmp, Tmp, 0x200000);
++  sub(ARMEmitter::Size::i64Bit, Tmp, REG_CALLRET_SP, Tmp);
++  lsr(ARMEmitter::Size::i64Bit, Tmp, Tmp, 22);
++  (void)cbz(ARMEmitter::Size::i64Bit, Tmp, &l_callret_ok);
++  ldr(REG_CALLRET_SP, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
++  add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x400000);
++  (void)Bind(&l_callret_ok);
++}
++
+ DEF_OP(CallbackReturn) {
+   // spill back to CTX
+   SpillStaticRegs(TMP1);
+@@ -172,35 +212,7 @@
+         // SEH-driven HandleAccessViolation never resets the stack on
+         // underflow. Detect-and-reset inline before the `stp` to keep stack
+         // pointer in-range. Uses TMP1 as scratch; adr below re-initializes it.
+-        {
+-          ARMEmitter::ForwardLabel l_callret_ok;
+-          /* iOS-Madeira ml263: the >>24 test only fires when the pointer leaves the
+-           * ENTIRE 16MB region, so a large-but-in-range leak sails straight through.
+-           * Measured on the CEF webhelper thread:
+-           *   tid 0098 sp-base=0x2c8c40 -> 1.1MB pushed  (~36,000 nested calls)
+-           *   tid 0078 sp-base=0x132900 -> 2.75MB pushed (~90,000 nested calls)
+-           * while those threads' GUEST stacks had used only 2,264 and 10,008 bytes. 36,000
+-           * nested calls cannot exist in 2.2KB of stack (every x86 CALL pushes >=8 bytes),
+-           * so entries are pushed and never popped -- non-local exits (SEH unwind, C++
+-           * throw) skip the guest RETs, and CEF init throws constantly.
+-           *
+-           * Bound it to a 4MB window CENTRED on DefaultLocation (base + 4MB): test
+-           * (sp - (base + 2MB)) >> 22, so sp-base must stay in [2MB, 6MB). Caps pushes at
+-           * ~131,072 entries (~65,536 nested calls), far beyond any real program.
+-           *
+-           * Resetting is SAFE, not a papering-over: this stack is purely a return-address
+-           * PREDICTOR. A stale or missing entry fails the `sub TMP1, TMP1, RipReg` compare
+-           * and falls through to the L1 lookup, which is always correct. A reset costs
+-           * mispredictions, nothing else. */
+-          ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
+-          add(ARMEmitter::Size::i64Bit, TMP1, TMP1, 0x200000);
+-          sub(ARMEmitter::Size::i64Bit, TMP1, REG_CALLRET_SP, TMP1);
+-          lsr(ARMEmitter::Size::i64Bit, TMP1, TMP1, 22);
+-          (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &l_callret_ok);
+-          ldr(REG_CALLRET_SP, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
+-          add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x400000);
+-          (void)Bind(&l_callret_ok);
+-        }
++        EmitCallRetGuard(TMP1);   // 0.50.339: see Arm64JITCore::EmitCallRetGuard
+ #endif
+ #ifdef FEX_CALLRET_STACK_UNUSED
+         // Nothing reads the call-ret shadow stack in this module (see FEX_CALLRET_STACK_UNUSED in
+@@ -260,18 +272,7 @@
+       ldr(REG_CALLRET_SP, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp));
+       // iOS-Madeira 2026-05-18: inline bounds-guard (Tier-2) — see CALL push
+       // site for rationale. Reset to DefaultLocation if OOB before ldp.
+-      {
+-        ARMEmitter::ForwardLabel l_callret_ok;
+-        /* iOS-Madeira ml263: tightened to a 4MB window -- see the first CALL push site. */
+-        ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
+-        add(ARMEmitter::Size::i64Bit, TMP1, TMP1, 0x200000);
+-        sub(ARMEmitter::Size::i64Bit, TMP1, REG_CALLRET_SP, TMP1);
+-        lsr(ARMEmitter::Size::i64Bit, TMP1, TMP1, 22);
+-        (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &l_callret_ok);
+-        ldr(REG_CALLRET_SP, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
+-        add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x400000);
+-        (void)Bind(&l_callret_ok);
+-      }
++      EmitCallRetGuard(TMP1);   // 0.50.339: see Arm64JITCore::EmitCallRetGuard
+ #endif
+       ldp<ARMEmitter::IndexType::POST>(TMP1, TMP2, REG_CALLRET_SP, 0x10);
+ #ifdef ARCHITECTURE_arm64ec
+@@ -341,18 +342,7 @@
+       ldr(REG_CALLRET_SP, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp));
+       // iOS-Madeira 2026-05-18: inline bounds-guard (Tier-2). Same as
+       // linked-path CALL push.
+-      {
+-        ARMEmitter::ForwardLabel l_callret_ok;
+-        /* iOS-Madeira ml263: tightened to a 4MB window -- see the first CALL push site. */
+-        ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
+-        add(ARMEmitter::Size::i64Bit, TMP1, TMP1, 0x200000);
+-        sub(ARMEmitter::Size::i64Bit, TMP1, REG_CALLRET_SP, TMP1);
+-        lsr(ARMEmitter::Size::i64Bit, TMP1, TMP1, 22);
+-        (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &l_callret_ok);
+-        ldr(REG_CALLRET_SP, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp_base));
+-        add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x400000);
+-        (void)Bind(&l_callret_ok);
+-      }
++      EmitCallRetGuard(TMP1);   // 0.50.339: see Arm64JITCore::EmitCallRetGuard
+ #endif
+ #ifdef FEX_CALLRET_STACK_UNUSED
+       // No shadow-stack push in this module; this callsite is a register blr that is never
+diff -ruN a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -924,7 +924,7 @@
+ #endif
+ }
+ 
+-void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF) {
++void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF, bool SkipSuspendCheck) {
+   // Get the address of the JITCodeHeader and store in to the core state.
+   // Two instruction cost, each 1 cycle.
+   adr_OrRestart(TMP1, &HeaderLabel);
+@@ -945,7 +945,11 @@
+     }
+   }
+ 
+-  EmitSuspendInterruptCheck();
++  /* 0.50.339 (MADEIRA_FEX_LEAN=1): the doorbell check is left out at the point a CALL returns to. Everything that can run for long still has one: every
++   * function entry (this same code, reached by the call), every backward branch (the loop check in the block loop). */
++  if (!SkipSuspendCheck) {
++    EmitSuspendInterruptCheck();
++  }
+ }
+ 
+ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size, bool SingleInst, const FEXCore::IR::IRListView* IR,
+@@ -1077,13 +1081,14 @@
+           // If we just emitted a call, but the block we're now emitting is not the return block so don't fallthrough.
+           b_OrRestart(PendingCallReturnTargetLabel);
+         }
++        const bool IsCallReturnFallthrough = PendingCallReturnTargetLabel == &IsReturnTarget->second && !PendingTargetLabel;
+         PendingCallReturnTargetLabel = nullptr;
+ 
+         BindOrRestart(&IsReturnTarget->second);
+         CodeData.EntryPoints.emplace(BlockStartRIP, GetCursorAddress<uint8_t*>());
+         DebugData->GuestOpcodes.push_back({BlockIROp->GuestEntryOffset, GetCursorAddress<uint8_t*>() - CodeData.BlockBegin});
+ 
+-        EmitEntryPoint(JITCodeHeaderLabel, CheckTF);
++        EmitEntryPoint(JITCodeHeaderLabel, CheckTF, IsCallReturnFallthrough && LeanCallRetEnabled());
+         // [iOS-Madeira] verbose EmitEntryPoint-done log suppressed
+       }
+ 
+diff -ruN a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -695,8 +695,10 @@
+   void EmitTFCheck();
+ 
+   void EmitSuspendInterruptCheck();
++  void EmitCallRetGuard(ARMEmitter::XRegister Tmp);
++  static bool LeanCallRetEnabled();
+ 
+-  void EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF);
++  void EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF, bool SkipSuspendCheck = false);
+ 
+ #define DEF_OP(x) void Op_##x(IR::IROp_Header const* IROp, IR::Ref Node)
+ 
+diff -ruN a/FEXCore/include/FEXCore/Debug/InternalThreadState.h b/FEXCore/include/FEXCore/Debug/InternalThreadState.h
+--- a/FEXCore/include/FEXCore/Debug/InternalThreadState.h
++++ b/FEXCore/include/FEXCore/Debug/InternalThreadState.h
+@@ -150,6 +150,9 @@
+ 
+   // The low address of the call-ret stack allocation (not including guard pages)
+   void* CallRetStackBase {};
++  // 0.50.339: the start of the reservation CallRetStackBase lies in (CallRetStackBase is moved up to an 8MB boundary inside it, see Windows/Common/CallRetStack.h);
++  // what has to be released when the thread ends. nullptr = the old layout (base = reservation + one guard page).
++  void* CallRetStackReservation {};
+ 
+   uintptr_t JITGuardPage {};
+   uint64_t JITGuardOverflowArgument {};
+diff -ruN a/Source/Windows/Common/CallRetStack.h b/Source/Windows/Common/CallRetStack.h
+--- a/Source/Windows/Common/CallRetStack.h
++++ b/Source/Windows/Common/CallRetStack.h
+@@ -23,11 +23,15 @@
+ 
+ CallRetStackInfo GetInfoThread(FEXCore::Core::InternalThreadState* Thread) {
+   uint64_t Base = reinterpret_cast<uint64_t>(Thread->CallRetStackBase);
++  uint64_t Allocation = Thread->CallRetStackReservation ? reinterpret_cast<uint64_t>(Thread->CallRetStackReservation) : Base - FEXCore::Utils::FEX_PAGE_SIZE;
+   // Leave some room from the base for the default location to allow for underflows without constant exceptions
+-  return {Base - FEXCore::Utils::FEX_PAGE_SIZE, Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + FEXCore::Utils::FEX_PAGE_SIZE,
++  return {Allocation, Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + FEXCore::Utils::FEX_PAGE_SIZE,
+           Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4};
+ }
+ 
++/* 0.50.339: the base of every call-ret stack is a multiple of this. The JIT's lean guard (MADEIRA_FEX_LEAN) reads the window off the address itself. */
++static constexpr uint64_t CALLRET_BASE_ALIGNMENT = 0x800000;
++
+ /* Returns false if the call-ret stack could not be placed.
+  *
+  * This region has no unconstrained fallback ON PURPOSE (see below), so failure
+@@ -88,7 +92,8 @@
+ #endif
+ 
+   // Allocate the call-ret stack with guard pages on both sides
+-  const size_t CallRetStackAllocSize = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE;
++  /* 0.50.339: CALLRET_BASE_ALIGNMENT extra address space (only reserved, not touched) so that the base can be moved up to an 8MB boundary. */
++  const size_t CallRetStackAllocSize = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE + CALLRET_BASE_ALIGNMENT;
+   const void* CallRetStackAlloc = nullptr;
+ #ifdef FEX_IOS_HOST
+   /* iOS-Madeira ml324: steer the call-ret stack out of the guest VA band.
+@@ -139,12 +144,12 @@
+     return false;
+   }
+ 
+-  FEXCore::Allocator::VirtualName("FEXMem_CallRetStacks", CallRetStackAlloc,
+-                                  FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE);
+-  FEXCore::Allocator::VirtualTHPControl(CallRetStackAlloc, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE,
+-                                        FEXCore::Allocator::THPControl::Disable);
++  FEXCore::Allocator::VirtualName("FEXMem_CallRetStacks", CallRetStackAlloc, CallRetStackAllocSize);
++  FEXCore::Allocator::VirtualTHPControl(CallRetStackAlloc, CallRetStackAllocSize, FEXCore::Allocator::THPControl::Disable);
+ 
+-  Thread->CallRetStackBase = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CallRetStackAlloc) + FEXCore::Utils::FEX_PAGE_SIZE);
++  Thread->CallRetStackReservation = const_cast<void*>(CallRetStackAlloc);
++  Thread->CallRetStackBase = reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(CallRetStackAlloc) + FEXCore::Utils::FEX_PAGE_SIZE + CALLRET_BASE_ALIGNMENT - 1) &
++                                                    ~(uintptr_t)(CALLRET_BASE_ALIGNMENT - 1));
+   /* The COMMIT can fail on its own: the reservation only claims addresses.
+    * Hand the reservation back rather than leaking a 16MB hole in a band that
+    * is already too small to satisfy the next thread. */
+@@ -165,6 +170,7 @@
+                       Thread->CallRetStackBase);
+     ::VirtualFree(const_cast<void*>(CallRetStackAlloc), 0, MEM_RELEASE);
+     Thread->CallRetStackBase = nullptr;
++    Thread->CallRetStackReservation = nullptr;
+     return false;
+   }
+ 

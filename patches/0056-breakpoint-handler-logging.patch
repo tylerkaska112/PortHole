@@ -1,0 +1,212 @@
+--- a/dlls/ntdll/exception.c
++++ b/dlls/ntdll/exception.c
+@@ -109,6 +109,11 @@
+         handler->count = (ULONG_PTR *)(handler + 1);
+         *handler->count = 1;
+         RtlEnterCriticalSection( &vectored_handlers_section );
++        {
++            static LONG add_n;
++            if (add_n < 40 && InterlockedIncrement( &add_n ) <= 40)
++                ERR( "[veh] 0056 AddVectoredExceptionHandler first=%lu func=%p\n", first, func );
++        }
+         if (first) InsertHeadList( handler_list, &handler->entry );
+         else InsertTailList( handler_list, &handler->entry );
+         RtlLeaveCriticalSection( &vectored_handlers_section );
+@@ -161,6 +166,12 @@
+ 
+     mark = &vectored_exception_handlers;
+     entry = mark->Flink;
++    if (entry == mark && rec->ExceptionCode == EXCEPTION_BREAKPOINT)
++    {
++        static LONG nov_n;
++        if (nov_n < 20 && InterlockedIncrement( &nov_n ) <= 20)
++            ERR( "[veh] 0056 breakpoint at %p: the vectored handler list is EMPTY\n", rec->ExceptionAddress );
++    }
+     while (entry != mark)
+     {
+         handler = CONTAINING_RECORD( entry, VECTORED_HANDLER, entry );
+@@ -178,7 +189,7 @@
+          * signal_arm64ec.c. Vectored handlers are guest x64 code running under
+          * the emulator with a pointer to the live dispatch context; log Rsp
+          * around each call to catch the corruptor in the act. AV-only, capped. */
+-        if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION)
++        if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION || rec->ExceptionCode == EXCEPTION_BREAKPOINT)   /* Porthole 0056: breakpoints too */
+         {
+             static LONG veh_n;
+             if (veh_n < 60 && InterlockedIncrement( &veh_n ) <= 60)
+@@ -209,7 +220,7 @@
+ #endif
+         ret = func( &except_ptrs );
+ #ifdef __arm64ec__
+-        if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION)
++        if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION || rec->ExceptionCode == EXCEPTION_BREAKPOINT)
+         {
+             static LONG vehr_n;
+             if (vehr_n < 60 && InterlockedIncrement( &vehr_n ) <= 60)
+@@ -560,6 +571,10 @@
+  */
+ ULONG WINAPI RtlRemoveVectoredExceptionHandler( PVOID handler )
+ {
++    {
++        static LONG rem_n;   /* Porthole 0058 */
++        if (rem_n < 40 && InterlockedIncrement( &rem_n ) <= 40) ERR( "[veh] 0058 RemoveVectoredExceptionHandler %p\n", handler );
++    }
+     return remove_vectored_handler( &vectored_exception_handlers, handler );
+ }
+ 
+@@ -569,6 +584,11 @@
+  */
+ void WINAPI RtlSetUnhandledExceptionFilter( PRTL_EXCEPTION_FILTER filter )
+ {
++    {
++        static LONG uef_set_n;   /* Porthole 0058 */
++        if (uef_set_n < 30 && InterlockedIncrement( &uef_set_n ) <= 30)
++            ERR( "[uef] 0058 RtlSetUnhandledExceptionFilter %p (was %p)\n", filter, unhandled_exception_filter );
++    }
+     unhandled_exception_filter = filter;
+ }
+ 
+@@ -578,8 +598,22 @@
+  */
+ LONG WINAPI call_unhandled_exception_filter( PEXCEPTION_POINTERS eptr )
+ {
+-    if (!unhandled_exception_filter) return EXCEPTION_CONTINUE_SEARCH;
+-    return unhandled_exception_filter( eptr );
++    LONG res;
++    if (!unhandled_exception_filter)
++    {
++        static LONG uef_none_n;   /* Porthole 0058 */
++        if (uef_none_n < 20 && InterlockedIncrement( &uef_none_n ) <= 20)
++            ERR( "[uef] 0058 exception %lx at %p: no unhandled exception filter is set\n", eptr->ExceptionRecord->ExceptionCode, eptr->ExceptionRecord->ExceptionAddress );
++        return EXCEPTION_CONTINUE_SEARCH;
++    }
++    res = unhandled_exception_filter( eptr );
++    {
++        static LONG uef_call_n;
++        if (uef_call_n < 30 && InterlockedIncrement( &uef_call_n ) <= 30)
++            ERR( "[uef] 0058 filter %p for exception %lx at %p returned %ld\n", unhandled_exception_filter, eptr->ExceptionRecord->ExceptionCode,
++                 eptr->ExceptionRecord->ExceptionAddress, res );
++    }
++    return res;
+ }
+ 
+ /*******************************************************************
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -2652,6 +2652,7 @@
+  * what makes an unexpected guest handler visible) at negligible cost, and the
+  * census proves the probe stayed alive.
+  */
++static void ios_dump_handler_blocks( ULONG_PTR handler, const DISPATCHER_CONTEXT_ARM64EC *dispatch );
+ static void ios_seh_xlate_note( PEXCEPTION_ROUTINE orig, PEXCEPTION_ROUTINE final, BOOLEAN is_ec )
+ {
+     static void *seen[64];
+@@ -3482,6 +3483,15 @@
+ 
+                 res = call_seh_handler( rec, dispatch.EstablisherFrame, orig_context,
+                                         &dispatch, handler );
++                if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && !is_ec)   /* Porthole 0057: dump each guest handler that answers a breakpoint */
++                    ios_dump_handler_blocks( (ULONG_PTR)dispatch.LanguageHandler, &dispatch );
++                if (rec->ExceptionCode == EXCEPTION_BREAKPOINT)   /* Porthole 0056 */
++                {
++                    static LONG seh_bp_n;
++                    if (seh_bp_n < 60 && InterlockedIncrement( &seh_bp_n ) <= 60)
++                        ERR( "[seh] 0056 breakpoint at %p: handler %p (frame %p, control pc %p) returned %d\n", rec->ExceptionAddress,
++                             dispatch.LanguageHandler, (void *)dispatch.EstablisherFrame, (void *)dispatch.ControlPc, (int)res );
++                }
+             }
+             rec->ExceptionFlags &= EXCEPTION_NONCONTINUABLE;
+             TRACE( "handler at %p returned %lu\n", dispatch.LanguageHandler, res );
+@@ -3629,8 +3639,92 @@
+ 
+     /* return to x64 code so that the syscall entry thunk is invoked properly */
+     dispatch_emulation( context );
++}
++
++
++/* Porthole 0057 (diagnostic): the code of a guest exception handler. Black Ops 3's breakpoint handlers answer ExceptionContinueSearch (1) where
++ * Windows' must claim the exception; their code is obfuscated blocks joined by `jmp rel32`, so walk the jumps breadth first (96 bytes per block,
++ * up to 120 blocks, once per handler) and log the hex; also the handler's data (the scope table) and the dispatcher context. */
++static BOOL ios_read_guest( ULONG_PTR addr, void *buf, SIZE_T len )
++{
++    SIZE_T got = 0;
++    return !NtReadVirtualMemory( NtCurrentProcess(), (void *)addr, buf, len, &got ) && got == len;
++}
++
++static void ios_dump_code_graph( const char *label, ULONG_PTR start, unsigned max_blocks )
++{
++    ULONG_PTR queue[160];
++    unsigned qn = 0, qi = 0, i;
++
++    queue[qn++] = start;
++    while (qi < qn && qi < max_blocks)
++    {
++        unsigned char blk[96]; char row[sizeof(blk) * 2 + 1];
++        ULONG_PTR a = queue[qi++];
++        if (!ios_read_guest( a, blk, sizeof(blk) )) continue;
++        for (i = 0; i < sizeof(blk); i++) sprintf( row + i * 2, "%02x", blk[i] );
++        ERR( "[handler-dump] 0057 %s block %p: %s\n", label, (void *)a, row );
++        for (i = 0; i + 5 <= sizeof(blk); i++)
++        {
++            int off, len;
++            if (blk[i] == 0xe9) { off = 1; len = 5; }
++            else if (blk[i] == 0x0f && i + 6 <= sizeof(blk) && blk[i + 1] >= 0x80 && blk[i + 1] <= 0x8f) { off = 2; len = 6; }
++            else continue;
++            {
++                LONG rel; ULONG_PTR t; unsigned z;
++                memcpy( &rel, blk + i + off, 4 );
++                t = a + i + len + (LONG_PTR)rel;
++                if (t < start - 0x40000000 || t > start + 0x40000000) continue;
++                for (z = 0; z < qn; z++) if (queue[z] == t) break;
++                if (z == qn && qn < ARRAY_SIZE(queue)) queue[qn++] = t;
++            }
++        }
++    }
+ }
+ 
++static void ios_dump_handler_blocks( ULONG_PTR handler, const DISPATCHER_CONTEXT_ARM64EC *dispatch )
++{
++    static ULONG_PTR done_h[8], done_d[16];
++    static LONG nh, nd;
++    unsigned i;
++    LONG idx;
++
++    for (i = 0; i < ARRAY_SIZE(done_h); i++) if (done_h[i] == handler) break;
++    if (i == ARRAY_SIZE(done_h) && (idx = InterlockedIncrement( &nh ) - 1) < (LONG)ARRAY_SIZE(done_h))
++    {
++        done_h[idx] = handler;
++        ERR( "[handler-dump] 0057 handler=%p image=%p control_pc=%p frame=%p func_entry=%p handler_data=%p\n", (void *)handler, (void *)dispatch->ImageBase,
++             (void *)dispatch->ControlPc, (void *)dispatch->EstablisherFrame, dispatch->FunctionEntry, dispatch->HandlerData );
++        ios_dump_code_graph( "handler", handler, 120 );
++    }
++    /* The scope table (C-specific handler data: count, then {Begin, End, Handler, Target} RVAs): dump the code of the filter of the scope that
++     * covers the control pc, once per handler data. */
++    if (dispatch->HandlerData)
++    {
++        ULONG_PTR hd = (ULONG_PTR)dispatch->HandlerData;
++        for (i = 0; i < ARRAY_SIZE(done_d); i++) if (done_d[i] == hd) return;
++        if ((idx = InterlockedIncrement( &nd ) - 1) >= (LONG)ARRAY_SIZE(done_d)) return;
++        done_d[idx] = hd;
++        {
++            ULONG scope[1 + 4 * 24];
++            ULONG count, k, rva = (ULONG)(dispatch->ControlPc - dispatch->ImageBase);
++            if (!ios_read_guest( hd, scope, 4 * sizeof(ULONG) + sizeof(ULONG) )) return;
++            count = scope[0];
++            if (!count || count > 24 || !ios_read_guest( hd, scope, (1 + count * 4) * sizeof(ULONG) )) return;
++            for (k = 0; k < count; k++)
++            {
++                ULONG begin = scope[1 + k * 4], end = scope[2 + k * 4], filter = scope[3 + k * 4], target = scope[4 + k * 4];
++                ERR( "[handler-dump] 0057 scope data %p #%lu begin=%lx end=%lx filter=%lx target=%lx control_rva=%lx\n", (void *)hd, k, begin, end, filter, target, rva );
++                if (rva >= begin && rva < end && filter > 1)
++                {
++                    char label[48];
++                    sprintf( label, "filter#%lu", k );
++                    ios_dump_code_graph( label, dispatch->ImageBase + filter, 100 );
++                }
++            }
++        }
++    }
++}
+ 
+ static void * __attribute__((used)) prepare_exception_arm64ec( EXCEPTION_RECORD *rec, ARM64EC_NT_CONTEXT *context, ARM64_NT_CONTEXT *arm_ctx )
+ {

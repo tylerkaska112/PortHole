@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 The Porthole authors. See LICENSE.
+"""Keeps the parts of the Porthole website that follow the app up to date, from this repository's CHANGELOG.json:
+
+  * changelog.html   the "Every build" list (the newest builds, each with what was added, changed and fixed)
+  * download.html    the "Newest test build" line
+  * sitemap.xml      each page's <lastmod>, from the date the page file was last changed
+
+    python3 tools/refresh_site_content.py [--site ~/Desktop/porthole-site] [--builds 25]
+
+It only edits files in the site folder (between marker comments, so the hand-written text around them is never touched) and publishes nothing: commit and push
+the site yourself. Running it twice in a row changes nothing the second time.
+"""
+import argparse, datetime, html, json, os, re, sys
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--site", default=os.path.expanduser("~/Desktop/porthole-site"))
+ap.add_argument("--builds", type=int, default=25)
+args = ap.parse_args()
+site = os.path.expanduser(args.site)
+root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+entries = json.load(open(os.path.join(root, "CHANGELOG.json"), encoding="utf-8"))
+if not entries:
+    sys.exit("CHANGELOG.json is empty")
+newest = entries[0]
+e = html.escape
+
+
+def read(name):
+    return open(os.path.join(site, name), encoding="utf-8").read()
+
+
+def write(name, text):
+    path = os.path.join(site, name)
+    if os.path.exists(path) and open(path, encoding="utf-8").read() == text:
+        return False
+    open(path, "w", encoding="utf-8").write(text)
+    return True
+
+
+def between(text, start, end, inner, fallback_anchor=None):
+    """Replace what is between two marker comments; add the markers before `fallback_anchor` the first time."""
+    block = f"<!-- {start} -->{inner}<!-- {end} -->"
+    pattern = re.compile(r"<!-- %s -->.*?<!-- %s -->" % (re.escape(start), re.escape(end)), re.S)
+    if pattern.search(text):
+        return pattern.sub(lambda m: block, text, count=1)
+    if fallback_anchor and fallback_anchor in text:
+        return text.replace(fallback_anchor, block + "\n" + fallback_anchor, 1)
+    sys.exit(f"no marker <!-- {start} --> and no place to add it")
+
+
+def listing(title, items):
+    if not items:
+        return ""
+    return f"<p><b>{e(title)}</b></p><ul>" + "".join(f"<li>{e(i)}</li>" for i in items) + "</ul>"
+
+
+# 1. changelog.html: every build
+rows = []
+for entry in entries[: args.builds]:
+    body = listing("Added", entry.get("added", [])) + listing("Changed", entry.get("changed", [])) + listing("Fixed", entry.get("fixed", []))
+    summary = entry.get("summary", "")
+    rows.append(f'<details><summary>{e(entry["version"])} (build {e(str(entry["build"]))}): {e(summary)}</summary><div class="a">{body or "<p>No details.</p>"}</div></details>')
+builds = (f'\n  <h2 id="builds">Every build, newest first</h2>\n  <p class="fine">The last {len(rows)} builds, exactly as the app lists them in Settings &#8250; Updates. This list is made from the project\'s change log.</p>\n'
+          f'  <div class="faq">\n    ' + "\n    ".join(rows) + "\n  </div>\n  ")
+page = read("changelog.html")
+page = between(page, "builds:start", "builds:end", builds, fallback_anchor='<p class="fine" style="margin-top:30px">When the first public release')
+changed = [("changelog.html", write("changelog.html", page))]
+
+# 2. download.html: the newest build
+today = datetime.date.today()
+line = f'Newest test build: {e(newest["version"])} ({e(str(newest["build"]))}). Page updated {today.day} {today.strftime("%B %Y")}.'
+dl = read("download.html")
+new_dl = between(dl, "build:start", "build:end", line)
+# the date only moves when the build does (or the page file was edited), so a second run is a no-op
+old = re.search(r"<!-- build:start -->(.*?)<!-- build:end -->", dl, re.S)
+if old and re.sub(r"Page updated .*", "", old.group(1)) == re.sub(r"Page updated .*", "", line):
+    new_dl = dl
+changed.append(("download.html", write("download.html", new_dl)))
+
+# 3. sitemap.xml: lastmod from each page file
+sm = read("sitemap.xml")
+
+
+def lastmod(match):
+    path = match.group(1)
+    name = "index.html" if path in ("", "/") else path.lstrip("/")
+    file = os.path.join(site, name)
+    date = datetime.date.fromtimestamp(os.path.getmtime(file)) if os.path.exists(file) else today
+    return f"<loc>https://portholehq.site{path}</loc><lastmod>{date.isoformat()}</lastmod>"
+
+
+sm_new = re.sub(r"<loc>https://portholehq\.site([^<]*)</loc><lastmod>[^<]*</lastmod>", lastmod, sm)
+changed.append(("sitemap.xml", write("sitemap.xml", sm_new)))
+
+for name, did in changed:
+    print(("updated " if did else "unchanged ") + name)
+print(f"newest build {newest['version']} ({newest['build']}), {len(rows)} builds listed")
