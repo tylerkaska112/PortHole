@@ -1,0 +1,40 @@
+diff -ruN a/build/win32u-unix/sysparams_ios.c b/build/win32u-unix/sysparams_ios.c
+--- a/build/win32u-unix/sysparams_ios.c	2026-10-16 03:34:44
++++ b/build/win32u-unix/sysparams_ios.c	2026-10-16 03:34:44
+@@ -5500,6 +5500,36 @@
+         return TRUE;
+     }
+ 
++#ifdef WINE_IOS
++    /* 0155: this port has ONE virtual monitor. A handle that matches none of the monitors (BeamNG.drive's
++     * getMonitorDescription: "Unable to get monitor info") is answered with the primary monitor instead of an
++     * error, so a program that sizes a borderless window from the monitor rectangle gets the screen and not 0x0.
++     * The first few are logged with the handle asked and the handles that exist. */
++    {
++        static unsigned long fb_n;
++        struct monitor *m, *pick = NULL;
++
++        LIST_FOR_EACH_ENTRY( m, &monitors, struct monitor, entry )
++        {
++            if (!is_monitor_active( m ) || m->is_clone) continue;
++            if (!pick || is_monitor_primary( m )) pick = m;
++        }
++        if (++fb_n <= 8)
++        {
++            dprintf( STDERR_FILENO, "[monitor-info] 0155 #%lu GetMonitorInfo(%p, cbSize=%u): no such monitor; valid handles:", fb_n,
++                     handle, (unsigned)info->cbSize );
++            LIST_FOR_EACH_ENTRY( m, &monitors, struct monitor, entry )
++                dprintf( STDERR_FILENO, " %p%s", m->handle, m == pick ? "(answered)" : "" );
++            dprintf( STDERR_FILENO, "%s\n", pick ? "" : " none" );
++        }
++        if (pick)
++        {
++            monitor_get_info( pick, info, dpi );
++            unlock_display_devices();
++            return TRUE;
++        }
++    }
++#endif
+     unlock_display_devices();
+     WARN( "invalid handle %p\n", handle );
+     RtlSetLastWin32Error( ERROR_INVALID_MONITOR_HANDLE );

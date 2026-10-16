@@ -9,7 +9,9 @@ enum GameFixes {
         let steamAppID: Int
         let title: String
         /// Files, relative to the folder the game's program is in, that are set aside (renamed with `disabledSuffix`) before the game starts.
-        let hide: [String]
+        var hide: [String]
+        /// Files an earlier build of this fix set aside and that must come back (the workaround turned out to do harm); put back on every launch.
+        var formerlyHidden: [String] = []
         let why: String
         /// Libraries Wine must refuse to load for this game (`WINEDLLOVERRIDES=name=`). Refused before anything is copied into the emulator's code pool.
         var blockLoading: [String] = []
@@ -25,6 +27,13 @@ enum GameFixes {
         /// The game's Chromium helper programs (a launcher's web UI) want a 32 GB address-space pool aligned to 32 GB; this moves the emulator's band out of the
         /// way so they can have one (patch 0105, `pa-pool32-soft`). Only for games that need it: it changes the address-space layout.
         var paPool32 = false
+        /// Rockstar's launcher only: its web host (SocialClubHelper.exe) runs as one process (`MADEIRA_ROCKSTAR_SINGLE_PROCESS`). Other games with Chromium inside do not need it.
+        var singleProcessWeb = false
+        /// Chromium's allocator inside the game itself (BeamNG.drive): the game's own process gets the glued PartitionAlloc pools Social Club's helper gets
+        /// (`MADEIRA_SC_PA_POOLS = 1` moves the emulator's arena at start; patch 0152, `MADEIRA_GLUED_MAIN`).
+        var gluedPools = false
+        /// Lines added to the game's own madeira.cfg text (the game's own lines win where both set a key). The app reads some of them before the runtime starts.
+        var configLines: [String] = []
 
         /// The value for WINEDLLOVERRIDES, e.g. "avrt=;foo=".
         var overridesValue: String { blockLoading.map { $0 + "=" }.joined(separator: ";") }
@@ -48,7 +57,11 @@ enum GameFixes {
         Fix(steamAppID: 1174180, title: "Red Dead Redemption 2",
             hide: [],
             why: "Rockstar's launcher shows its pages with Chromium (SocialClubHelper.exe). Its memory allocator wants a 32 GB address-space pool aligned to 32 GB, which the emulator's band at the top of the address space prevents: every helper stopped at start and the launcher said it timed out loading its content. The band is moved so the pool fits.",
-            paPool32: true),
+            paPool32: true, singleProcessWeb: true),
+        Fix(steamAppID: 284160, title: "BeamNG.drive",
+            hide: [], formerlyHidden: ["Bin64/D3DCOMPILER_47.dll"],
+            why: "BeamNG.drive has Chromium's allocator inside the game (its user interface). That allocator asks for a 32 GB pool aligned to 32 GB, frees the three answers it cannot use because they are only 16 GB aligned, asks for 64 GB less 64 KB to align it itself, and the game stops with 0x80000003 (STATUS_BREAKPOINT) when that is refused. The game program has its own switch for this (read from its 0.39.4 program, 2026-10-16: -forceUltralight makes it build its menus on Ultralight, a one-process renderer, and never start Chromium), so Madeira appends it to the game's command line (MADEIRA_CHILD_ARGS). Before that: with --single-process the game's Chromium still started a GPU process, which is refused (one Chromium process is all the address space holds), and Chromium then ended with \"GPU process isn't usable\" (2026-10-16 02:31): the same switches Madeira gives Rockstar's and Ubisoft's launchers (--disable-gpu, --disable-gpu-compositing) did not stop it (2026-10-16 02:37: the GPU process and the network and storage services were still started as children, and refused), so the GPU runs in the process (--in-process-gpu) and the network and storage services are asked to as well. Its helper processes (the interface runs in several, each a full copy of the 47 MB game program) filled the emulator's code pool at the fifth one (EXHAUSTED, 0xc0000017, 2026-10-16 02:19), so plain 64-bit programs now run from their loaded image without a pool copy (MADEIRA_X64_IMAGE_NOCOPY, part of Madeira's Red Dead Redemption 2 recipe). The game now gets the layout Madeira built for Rockstar's Social Club (also Chromium with several allocators in one process): a real slot for each 32 GB block, the emulator's arena moved 4 GB up and the JIT pool's alias moved, all at start. (The other layout, pa-pool32-soft, was tried on a device on 2026-10-16 and refuses the ask sooner.) (Wine's own shader compiler cannot read the game's material shaders, so the game keeps its own.)",
+            gluedPools: true, configLines: ["env.MADEIRA_SC_PA_POOLS = 2", "env.MADEIRA_X64_IMAGE_NOCOPY = 1", "env.MADEIRA_CAGE_RELEASE = 1", "env.MADEIRA_LOCK_ORPHAN = 0", "env.MADEIRA_CHILD_ARGS = BeamNG.drive.x64.exe -forceUltralight -flushLogErrors -logeverything", "env.MADEIRA_SC_CEF_FLAGS = --in-process-gpu --disable-gpu --disable-gpu-compositing --enable-features=NetworkServiceInProcess,NetworkServiceInProcess2 --disable-features=PartitionAllocBackupRefPtr,StorageServiceOutOfProcess"]),
     ]
 
     static func fix(forSteamAppID id: Int?) -> Fix? {
@@ -63,7 +76,7 @@ enum GameFixes {
         var done: [String] = []
         let root = folder.standardizedFileURL.path
         for relative in fix.hide {
-            let url = folder.appendingPathComponent(relative).standardizedFileURL
+            let url = resolvedIgnoringCase(relative, in: folder, fileManager: fm).standardizedFileURL
             guard url.path.hasPrefix(root + "/") else { done.append("refused \(relative): outside the game folder"); continue }
             guard fm.fileExists(atPath: url.path) else { continue }
             let aside = URL(fileURLWithPath: url.path + disabledSuffix)
@@ -76,6 +89,20 @@ enum GameFixes {
             }
         }
         return done
+    }
+
+    /// `relative` under `folder`, with each part matched to the real name on disk ignoring case (Windows would; the game folder's files keep the case Steam wrote).
+    static func resolvedIgnoringCase(_ relative: String, in folder: URL, fileManager fm: FileManager = .default) -> URL {
+        var url = folder
+        for part in relative.split(separator: "/").map(String.init) {
+            if let names = try? fm.contentsOfDirectory(atPath: url.path),
+               let hit = names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame }) {
+                url = url.appendingPathComponent(hit)
+            } else {
+                url = url.appendingPathComponent(part)
+            }
+        }
+        return url
     }
 
     /// The file called `name` in the same folder as `program`, if it exists (compared ignoring case, as Windows would).
@@ -94,13 +121,21 @@ enum GameFixes {
         return parts.joined(separator: "\\")
     }
 
+    /// Puts back the files an earlier build set aside for this game (`formerlyHidden`).
+    @discardableResult
+    static func restoreFormer(_ fix: Fix, in folder: URL, fileManager fm: FileManager = .default) -> [String] {
+        guard !fix.formerlyHidden.isEmpty else { return [] }
+        var copy = fix; copy.hide = fix.formerlyHidden
+        return restore(copy, in: folder, fileManager: fm)
+    }
+
     /// Puts the fix's files back.
     @discardableResult
     static func restore(_ fix: Fix, in folder: URL, fileManager fm: FileManager = .default) -> [String] {
         var done: [String] = []
         for relative in fix.hide {
-            let url = folder.appendingPathComponent(relative)
-            let aside = URL(fileURLWithPath: url.path + disabledSuffix)
+            let aside = resolvedIgnoringCase(relative + disabledSuffix, in: folder, fileManager: fm)
+            let url = URL(fileURLWithPath: String(aside.path.dropLast(disabledSuffix.count)))
             guard fm.fileExists(atPath: aside.path), !fm.fileExists(atPath: url.path) else { continue }
             do { try fm.moveItem(at: aside, to: url); done.append("restored \(relative)") }
             catch { done.append("couldn't restore \(relative): \(error.localizedDescription)") }

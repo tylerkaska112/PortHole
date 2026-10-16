@@ -1,0 +1,20 @@
+diff -ruN a/build/ntdll-unix/process_ios.c b/build/ntdll-unix/process_ios.c
+--- a/build/ntdll-unix/process_ios.c	2026-10-16 02:27:59
++++ b/build/ntdll-unix/process_ios.c	2026-10-16 02:27:59
+@@ -1244,7 +1244,15 @@
+ /* What kind of Social Club process `image` with command line `cl` is. */
+ static int sc_helper_kind( const WCHAR *image, int image_len, const WCHAR *cl, int cl_len )
+ {
+-    if (!ios_image_name_is( image, image_len, "socialclubhelper.exe" )) return SC_NOT_HELPER;
++    if (!ios_image_name_is( image, image_len, "socialclubhelper.exe" ))
++    {
++        /* 0153: env.MADEIRA_GLUED_MAIN = 1 (the app sets it for BeamNG.drive): the game's own program hosts Chromium (CEF 148), and every Chromium process wants its own
++         * 32 GB PartitionAlloc pool on a 32 GB boundary, of which the address space holds one set (see virtual_ios.c, patch 0152). BeamNG.drive log of 2026-10-16 02:25: the main
++         * process got the pools, then its GPU, network and storage helpers were all refused and ended with 0x80000003. Same answer as for Social Club's helper and Steam's
++         * web helper: --single-process, and a --type= child is refused. */
++        const char *g = getenv( "MADEIRA_GLUED_MAIN" );
++        if (!(g && g[0] == '1' && ios_image_name_is( image, image_len, "beamng.drive.x64.exe" ))) return SC_NOT_HELPER;
++    }
+     return sc_switch_end( cl, cl_len, "--type=" ) >= 0 ? SC_CHILD : SC_BROWSER;
+ }
+ 

@@ -4,7 +4,7 @@
 """Keeps the parts of the Porthole website that follow the app up to date, from this repository's CHANGELOG.json:
 
   * changelog.html   the "Every build" list (the newest builds, each with what was added, changed and fixed)
-  * download.html    the "Newest test build" line
+  * download.html    the "Latest release" line (only when --release VERSION BUILD is given: the page names the public release, not the newest build)
   * sitemap.xml      each page's <lastmod>, from the date the page file was last changed
 
     python3 tools/refresh_site_content.py [--site ~/Desktop/porthole-site] [--builds 25]
@@ -17,6 +17,7 @@ import argparse, datetime, html, json, os, re, sys
 ap = argparse.ArgumentParser()
 ap.add_argument("--site", default=os.path.expanduser("~/Desktop/porthole-site"))
 ap.add_argument("--builds", type=int, default=25)
+ap.add_argument("--release", nargs=2, metavar=("VERSION", "BUILD"), help="the newest PUBLIC release, for the download page's line (leave out to leave that line alone)")
 args = ap.parse_args()
 site = os.path.expanduser(args.site)
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -66,19 +67,20 @@ for entry in entries[: args.builds]:
 builds = (f'\n  <h2 id="builds">Every build, newest first</h2>\n  <p class="fine">The last {len(rows)} builds, exactly as the app lists them in Settings &#8250; Updates. This list is made from the project\'s change log.</p>\n'
           f'  <div class="faq">\n    ' + "\n    ".join(rows) + "\n  </div>\n  ")
 page = read("changelog.html")
-page = between(page, "builds:start", "builds:end", builds, fallback_anchor='<p class="fine" style="margin-top:30px">When the first public release')
+page = between(page, "builds:start", "builds:end", builds, fallback_anchor='<p class="fine" style="margin-top:30px">Every release is also on the project')
 changed = [("changelog.html", write("changelog.html", page))]
 
-# 2. download.html: the newest build
+# 2. download.html: the newest public release (the newest build in the change log may not have been released)
 today = datetime.date.today()
-line = f'Newest test build: {e(newest["version"])} ({e(str(newest["build"]))}). Page updated {today.day} {today.strftime("%B %Y")}.'
-dl = read("download.html")
-new_dl = between(dl, "build:start", "build:end", line)
-# the date only moves when the build does (or the page file was edited), so a second run is a no-op
-old = re.search(r"<!-- build:start -->(.*?)<!-- build:end -->", dl, re.S)
-if old and re.sub(r"Page updated .*", "", old.group(1)) == re.sub(r"Page updated .*", "", line):
-    new_dl = dl
-changed.append(("download.html", write("download.html", new_dl)))
+if args.release:
+    line = f'Latest release: {e(args.release[0])} (build {e(args.release[1])}). Page updated {today.day} {today.strftime("%B %Y")}.'
+    dl = read("download.html")
+    new_dl = between(dl, "build:start", "build:end", line)
+    # the date only moves when the release does (or the page file was edited), so a second run is a no-op
+    old = re.search(r"<!-- build:start -->(.*?)<!-- build:end -->", dl, re.S)
+    if old and re.sub(r"Page updated .*", "", old.group(1)) == re.sub(r"Page updated .*", "", line):
+        new_dl = dl
+    changed.append(("download.html", write("download.html", new_dl)))
 
 # 3. sitemap.xml: lastmod from each page file
 sm = read("sitemap.xml")

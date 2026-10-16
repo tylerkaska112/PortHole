@@ -42,4 +42,12 @@ try! fm.removeItem(at: acDir.appendingPathComponent("ACS.EXE"))
 check(GameFixes.sibling(named: "acs.exe", of: acDir.appendingPathComponent("AssettoCorsa.exe")) == nil, "a missing program is reported, so the launch stays as it was")
 try? fm.removeItem(at: acDir)
 check(ac.ownSteamIdentity && String(GameFixes.windowsPath(replacingLastComponentOf: "C:\\a\\b\\AssettoCorsa.exe", with: "").dropLast()) == "C:\\a\\b", "the install folder is the program's folder without a trailing backslash")
-print(failures == 0 ? "all passed" : "\(failures) FAILED"); exit(failures == 0 ? 0 : 1)
+print(failures == 0 ? "all passed" : "\(failures) FAILED"); 
+// A file an earlier build set aside comes back, whatever its capitals on disk
+let bng = tmp.appendingPathComponent("bng/Bin64"); try! fm.createDirectory(at: bng, withIntermediateDirectories: true)
+try! Data("compiler".utf8).write(to: bng.appendingPathComponent("D3DCOMPILER_47.dll.porthole-disabled"))
+let beam = GameFixes.fix(forSteamAppID: 284160)!
+check(beam.hide.isEmpty && !beam.formerlyHidden.isEmpty, "BeamNG keeps its own shader compiler (Wine's cannot read its materials)")
+let back = GameFixes.restoreFormer(beam, in: tmp.appendingPathComponent("bng"))
+check(back == ["restored Bin64/D3DCOMPILER_47.dll"] && fm.fileExists(atPath: bng.appendingPathComponent("D3DCOMPILER_47.dll").path), "the former set-aside compiler is put back: \(back)")
+exit(failures == 0 ? 0 : 1)

@@ -79,3 +79,4 @@ print("✓ latest.json: %s (%s), checksum and signature match the IPA%s" % (vers
 PY
 echo "▸ done. The IPA to upload to GitHub is the same file: $IPA"
 echo "   SHA-256: $SHA"
+echo "   Next: tools/finish_release.sh   (brings main and prerelease up to this release's commit and tags it)"

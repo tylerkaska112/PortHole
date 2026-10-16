@@ -212,6 +212,8 @@ enum EngineLaunch {
             // The game's own lines, with the switch's lines first: the game's text wins where both set a key (as in Madeira's gameConfigText).
             var own = e.config ?? ""
             if e.largeReservations == true { own = "oversize-reserve = 1\nfft-arena-patch = 1" + (own.isEmpty ? "" : "\n" + own) }
+            // A known game's own lines (GameFixes), first: the person's text wins where both set a key. The app reads some of them before the runtime starts.
+            if let fix = GameFixes.fix(forSteamAppID: game.dockAppID ?? game.steamAppID), !fix.configLines.isEmpty { own = fix.configLines.joined(separator: "\n") + (own.isEmpty ? "" : "\n" + own) }
             let pairs = try MadeiraConfig.applyGame(own.isEmpty ? nil : own)
             if !pairs.isEmpty { LogStore.shared.log("[game-cfg] " + pairs.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")) }
         } catch {

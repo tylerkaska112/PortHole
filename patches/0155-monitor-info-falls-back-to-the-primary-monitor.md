@@ -1,0 +1,7 @@
+# 0155 win32u: GetMonitorInfo answers with the primary monitor for a handle it does not know
+
+`build/win32u-unix/sysparams_ios.c` (`get_monitor_info`): this port has one virtual monitor. When the handle matches no monitor, the primary one is answered instead of `ERROR_INVALID_MONITOR_HANDLE`, and the first eight such calls are logged as `[monitor-info] 0155 #N GetMonitorInfo(handle, cbSize=...): no such monitor; valid handles: ...`.
+
+Reason (BeamNG.drive 0.39.4.0, logs 2026-10-16 03:27 and 03:30, build 494): the game runs (Ultralight menu works) but switching Display to Borderless leaves a blank desktop with sound. Every start logs `E|engine::Platform::Win32::getMonitorDescription| Unable to get monitor info` (a `GetMonitorInfoW(hMonitor, MONITORINFOEXW)` that returned FALSE, called from `BeamNG.drive.x64.exe`+0x8a69c0 with the handle of its monitor list). For Borderless the game then sets its swapchain window (`0x100f4`) to style WS_POPUP and a position/size of 0x0, and the Metal layer follows (`drawable 640x480`, `metal layer 0x0 pt`), so nothing is drawn.
+How to test: the log shows `[monitor-info] 0155` lines (they say which handle the game asked for and which exist), no `getMonitorDescription` error in beamng.log, and after choosing Borderless the swapchain window gets `window={0,0,1920,1080}`. UNKNOWN: whether the handle was really unknown (it may have been another failure path, then no `[monitor-info]` line appears and this patch changes nothing). Untested on a device.
+Library: `gl-lib-0155` (win32u `sysparams` object rebuilt on `gl-lib-0154`).

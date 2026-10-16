@@ -1,0 +1,54 @@
+diff -ruN a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-16 01:35:41
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-16 01:35:41
+@@ -1871,6 +1871,28 @@
+     return 0;
+ }
+ 
++/* 0151: give a soft slot back. A soft grant is a table entry and nothing else: no view, no mapping. The pools it was made for (PartitionAlloc, V8) keep theirs
++ * for the life of the process, but BeamNG.drive (2026-10-16, 0.50.383) reserves 32 GB, gets a soft slot at 0x7400000000 because no real hole is that big, and at once
++ * releases it with VirtualFree(base, 0, MEM_RELEASE) before reserving again its own way. No view meant STATUS_MEMORY_NOT_ALLOCATED (0xc00000a0), the game treated that
++ * as fatal and executed ud2. Only a slot nothing was ever committed in is given back (one with commits keeps the old answer), and the table has just 8 places, so
++ * a released slot must also free its place. Called with virtual_mutex held. */
++static int ios_soft_release( uint64_t base, SIZE_T *size )
++{
++    unsigned i;
++    for (i = 0; i < ios_soft_n; i++)
++    {
++        if (ios_soft[i].base != base || ios_soft[i].cage) continue;
++        if (ios_soft[i].commits || ios_soft[i].committed || ios_soft[i].collisions) return 0;
++        *size = (SIZE_T)ios_soft[i].size;
++        dprintf( 2, "[soft-pool] 0151 RELEASED soft 0x%llx +%lluMB (nothing was ever committed in it)\n",
++                 (unsigned long long)base, (unsigned long long)(ios_soft[i].size >> 20) );
++        memmove( &ios_soft[i], &ios_soft[i + 1], (ios_soft_n - i - 1) * sizeof(ios_soft[0]) );
++        ios_soft_n--;
++        return 1;
++    }
++    return 0;
++}
++
+ static void ios_soft_report( const char *why )
+ {
+     unsigned i;
+@@ -32548,6 +32570,21 @@
+     }
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++
++#ifdef WINE_IOS
++    /* 0151: VirtualFree(base, 0, MEM_RELEASE) of a soft slot that nothing was committed in (see ios_soft_release). */
++    if (type == MEM_RELEASE && !size && base && ios_soft_n)
++    {
++        SIZE_T soft_size = 0;
++        if (ios_soft_release( (uint64_t)(uintptr_t)base, &soft_size ))
++        {
++            *addr_ptr = base;
++            *size_ptr = soft_size;
++            server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++            return STATUS_SUCCESS;
++        }
++    }
++#endif
+ 
+ #ifdef WINE_IOS
+     /* Madeira: a thin reservation's tail holds nothing; see ios_thin_reserve. */

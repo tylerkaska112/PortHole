@@ -18,6 +18,8 @@ OUT="$(cd "$OUT" && pwd)"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 echo "▸ Porthole $VERSION ($BUILD), public build"
 tools/engine.sh check
+# The staged runtime must be the one this build folder holds (a stale stage ships an old engine without any other sign).
+tools/check_stage.sh || exit 1
 
 echo "▸ 1/4 the clean source tree"
 tools/export_public.sh "$OUT/source" | tail -2
@@ -63,7 +65,7 @@ SCRUB_ALLOW="tylerkaska112" SCRUB_STRICT=1 tools/package_app.sh "$WORK/DD/Build/
 ( cd "$OUT" && shasum -a 256 "$(basename "$IPA")" > "$(basename "$IPA").sha256" )
 
 echo "▸ 4/4 audit"
-AUDIT_ALLOW_HUB="$HUB_FOR_AUDIT" AUDIT_EXPECT_APPID="${HUB_FOR_AUDIT:+$PUBLIC_CHANNEL}" AUDIT_EXPECT_RELEASE_KEY="$RELEASE_KEY" tools/audit_ipa.sh "$IPA"
+AUDIT_ALLOW_HUB="$HUB_FOR_AUDIT" AUDIT_ALLOW_SOURCE="${PUBLIC_SOURCE_URL:-}" AUDIT_EXPECT_APPID="${HUB_FOR_AUDIT:+$PUBLIC_CHANNEL}" AUDIT_EXPECT_RELEASE_KEY="$RELEASE_KEY" tools/audit_ipa.sh "$IPA"
 
 NOTES="$(python3 - <<PY
 import json

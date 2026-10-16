@@ -193,15 +193,25 @@ final class SessionController: ObservableObject {
     }
 
     /// Games with a known problem get their small workaround (see GameFixes) right before they start.
+    private static var gluedPoolsSet = false
     private func applyKnownFixes(for game: Game) {
         let known = GameFixes.fix(forSteamAppID: game.dockAppID ?? game.steamAppID)
         // The address-space layout is decided once, when the runtime starts (virtual_ios.c ios_pa32_soft_enabled).
         if known?.paPool32 == true {
             setenv("MADEIRA_PA_POOL32_SOFT", "1", 1)
-            setenv("MADEIRA_ROCKSTAR_SINGLE_PROCESS", "1", 1)
-            LogStore.shared.log("[game-fix] \(known!.title): a 32 GB-aligned pool is kept free for Chromium's allocator, and its web host runs single-process")
+            if known?.singleProcessWeb == true { setenv("MADEIRA_ROCKSTAR_SINGLE_PROCESS", "1", 1) } else { unsetenv("MADEIRA_ROCKSTAR_SINGLE_PROCESS") }
+            LogStore.shared.log("[game-fix] \(known!.title): a 32 GB-aligned pool is kept free for Chromium's allocator\(known?.singleProcessWeb == true ? ", and its web host runs single-process" : "")")
         } else { unsetenv("MADEIRA_PA_POOL32_SOFT"); unsetenv("MADEIRA_ROCKSTAR_SINGLE_PROCESS") }
+        // Patch 0152: read once, when the runtime starts. The layout variable is only taken back if this fix set it (a game's own config line may be using it).
+        if known?.gluedPools == true {
+            setenv("MADEIRA_SC_PA_POOLS", "2", 1); setenv("MADEIRA_GLUED_MAIN", "1", 1); Self.gluedPoolsSet = true
+            LogStore.shared.log("[game-fix] \(known!.title): the game's own process gets Social Club's layout for Chromium's 32 GB pools (layout 2: the emulator's arena starts 4 GB higher)")
+        } else {
+            unsetenv("MADEIRA_GLUED_MAIN")
+            if Self.gluedPoolsSet { unsetenv("MADEIRA_SC_PA_POOLS"); Self.gluedPoolsSet = false }
+        }
         guard let fix = known, let exe = AppModel.unixURL(forWindows: game.exe) else { return }
+        for line in GameFixes.restoreFormer(fix, in: exe.deletingLastPathComponent()) { LogStore.shared.log("[game-fix] \(fix.title): \(line)") }
         for line in GameFixes.hide(fix, in: exe.deletingLastPathComponent()) { LogStore.shared.log("[game-fix] \(fix.title): \(line)") }
         // Wine reads this once, when the first library is loaded in this run, so it has to be set before the game starts.
         if !fix.blockLoading.isEmpty {
@@ -473,8 +483,17 @@ final class SessionController: ObservableObject {
             let launchOption = resolvedOption ?? 0
             // Steam Cloud, download only: the person's own cloud files for this game come first, while our Steam connection is still open (Valve's client, started below,
             // does not do this step when the Dock launches a game). A failure or a slow answer never stops the game from starting.
+            let gameFolder = storageRoot.flatMap { try? SteamStoragePath.native(dockGame.library + "/common/" + dockGame.installDir, root: $0) }
+            // A game started through Steam has no program path in the Library, so its known fix (files set aside) is applied to the install folder here.
+            if let fix = GameFixes.fix(forSteamAppID: dockGame.id), !fix.hide.isEmpty || !fix.formerlyHidden.isEmpty {
+                let folder = gameFolder ?? SteamInstallPaths.common(drive: AppModel.driveC).appendingPathComponent(dockGame.installDir, isDirectory: true)
+                for line in GameFixes.restoreFormer(fix, in: folder) { LogStore.shared.log("[game-fix] \(fix.title): \(line)") }
+                let done = fix.hide.isEmpty ? ["unused"] : GameFixes.hide(fix, in: folder)
+                for line in done where line != "unused" { LogStore.shared.log("[game-fix] \(fix.title): \(line)") }
+                // A fix that quietly does nothing is hard to find: say where it looked.
+                if done.isEmpty && !fix.hide.isEmpty { LogStore.shared.log("[game-fix] \(fix.title): nothing to set aside in \(folder.path) (\(fix.hide.joined(separator: ", ")))") }
+            }
             if Self.cloudDownloadEnabled {
-                let gameFolder = storageRoot.flatMap { try? SteamStoragePath.native(dockGame.library + "/common/" + dockGame.installDir, root: $0) }
                 await downloadCloudFiles(for: dockGame, installFolder: gameFolder)
             }
             if launchCancelled { ExternalLibrary.shared.releaseSession(force: true); return }

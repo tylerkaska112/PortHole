@@ -1,0 +1,123 @@
+diff -ruN a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-16 01:46:57
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-16 02:14:25
+@@ -1863,6 +1863,19 @@
+     return cached;
+ }
+ 
++/* 0152: env.MADEIRA_GLUED_MAIN = 1 (the app sets it, with MADEIRA_SC_PA_POOLS = 1, for BeamNG.drive; see GameFixes). Read once. */
++static int ios_glued_main( void )
++{
++    static int cached = -1;
++    if (cached < 0)
++    {
++        const char *e = getenv( "MADEIRA_GLUED_MAIN" );
++        cached = (e && *e == '1') ? 1 : 0;
++        if (cached) dprintf( 2, "[sc-cef] 0152 the game's own process gets a PartitionAlloc pool in two real parts (MADEIRA_GLUED_MAIN=1)\n" );
++    }
++    return cached;
++}
++
+ static int ios_soft_slot_taken( uint64_t slot )
+ {
+     unsigned i;
+@@ -15187,6 +15200,7 @@
+     return 1;
+ }
+ 
++static int ios_sc_layout(void);   /* 0152: defined further down */
+ /* Is the calling pseudo-process SocialClubHelper.exe? (its PEB's image path) */
+ static int ios_sc_current_is_helper(void)
+ {
+@@ -15194,6 +15208,9 @@
+     RTL_USER_PROCESS_PARAMETERS *pp = peb ? peb->ProcessParameters : NULL;
+ 
+     if (!pp || !pp->ImagePathName.Buffer) return 0;
++    /* 0152: with MADEIRA_GLUED_MAIN=1 and layout 2 (MADEIRA_SC_PA_POOLS=2) the game's own processes are served like the helper: BeamNG.drive has Chromium's
++     * allocators inside it (the exe's PartitionAlloc, libcef.dll's, Oilpan's cage), the same three 32 GB asks layout 2 was made for. */
++    if (ios_glued_main() && ios_sc_layout() == 2) return 1;
+     return ios_sc_path_is_helper( pp->ImagePathName.Buffer, pp->ImagePathName.Length / sizeof(WCHAR) );
+ }
+ 
+@@ -29521,7 +29538,60 @@
+     return STATUS_SUCCESS;
+ }
+ 
++/* 0152: a PartitionAlloc pool block (32 GB asked on a 32 GB boundary) for the game's OWN process, served in two real parts (opt-in, MADEIRA_GLUED_MAIN=1 with
++ * MADEIRA_SC_PA_POOLS=1, whose boot holds [0x7c00000000, +4 GB) below the emulator's arena). ios_sc_glued_pools gives Social Club's helper one 20 GB view
++ * [0x7800000000, 0x7d00000000); here that range is cut by the image window ([0x7a00000000, +4 GB), where the DLLs of the 64-bit farm are mapped: BeamNG.drive's log of
++ * 2026-10-16 shows `is not free (st=0xc0000018)` and images at 0x7a7bba0000), so the two parts that PartitionAlloc really fills are reserved on their own:
++ * the bottom of the regular pool, [0x7800000000, +8 GB), and the bottom of the BackupRefPtr pool, [0x7c00000000, +4 GB). PartitionAlloc takes super pages first-fit
++ * from the bottom of each pool, so a UI's few hundred MB stay inside them; the 32 GB are reported whole. A commit past either part fails as on any unreserved
++ * address. Returns 0 with the grant in *pick / *sz, else a failure status with nothing reserved. */
++#define IOS_GLUED_MAIN_LOW 0x200000000ULL   /* 8 GB of the regular pool */
++static NTSTATUS ios_glued_main_grant( void **pick, SIZE_T *sz, ULONG type, ULONG protect )
++{
++    void *lo = (void *)(uintptr_t)IOS_SC_GLUED_BASE, *hi = (void *)(uintptr_t)IOS_SC_BRP_HOLD_BASE;
++    SIZE_T lsz = IOS_GLUED_MAIN_LOW, hsz = IOS_SC_BRP_HOLD_SIZE;
++    NTSTATUS st;
++    static int taken;
+ 
++    if (!ios_sc_brp_layout || !ios_sc_brp_held || taken)
++    {
++        static int said;
++        if (!said++)
++            dprintf( 2, "[sc-cef] 0152 no glued pool for the game's own process: %s\n",
++                     taken ? "already given once" : "the emulator's arena was not moved at boot (needs MADEIRA_SC_PA_POOLS=1)" );
++        return STATUS_NO_MEMORY;
++    }
++    st = allocate_virtual_memory( &lo, &lsz, type, protect, 0, 0, 0, 0 );
++    if (st || (uintptr_t)lo != IOS_SC_GLUED_BASE)
++    {
++        if (!st) { SIZE_T fsz = 0; void *fb = lo; NtFreeVirtualMemory( NtCurrentProcess(), &fb, &fsz, MEM_RELEASE ); }
++        dprintf( 2, "[sc-cef] 0152 [0x%llx,+%llu GB) is not free (st=0x%x): no glued pool\n", IOS_SC_GLUED_BASE, (unsigned long long)(IOS_GLUED_MAIN_LOW >> 30), (unsigned)st );
++        return st ? st : STATUS_NO_MEMORY;
++    }
++    mach_vm_deallocate( mach_task_self(), IOS_SC_BRP_HOLD_BASE, IOS_SC_BRP_HOLD_SIZE );
++    ios_sc_brp_held = 0;
++    st = allocate_virtual_memory( &hi, &hsz, type, protect, 0, 0, 0, 0 );
++    if (st || (uintptr_t)hi != IOS_SC_BRP_HOLD_BASE)
++    {
++        mach_vm_address_t h = IOS_SC_BRP_HOLD_BASE;
++        SIZE_T fsz = 0; void *fb = lo;
++        if (!st) { SIZE_T gsz = 0; void *gb = hi; NtFreeVirtualMemory( NtCurrentProcess(), &gb, &gsz, MEM_RELEASE ); }
++        NtFreeVirtualMemory( NtCurrentProcess(), &fb, &fsz, MEM_RELEASE );
++        if (mach_vm_map( mach_task_self(), &h, IOS_SC_BRP_HOLD_SIZE, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, 0,
++                         PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY ) == KERN_SUCCESS)
++            ios_sc_brp_held = 1;
++        dprintf( 2, "[sc-cef] 0152 [0x%llx,+%llu GB) is not free (st=0x%x): no glued pool\n", IOS_SC_BRP_HOLD_BASE, (unsigned long long)(IOS_SC_BRP_HOLD_SIZE >> 30), (unsigned)st );
++        return st ? st : STATUS_NO_MEMORY;
++    }
++    taken = 1;
++    *pick = lo;
++    *sz = IOS_SC_GLUED_SIZE;
++    dprintf( 2, "[sc-cef] 0152 glued PartitionAlloc pool for the game's own process: 32 GB reported at 0x%llx, really [0x%llx,+%llu GB) and [0x%llx,+%llu GB)\n",
++             IOS_SC_GLUED_BASE, IOS_SC_GLUED_BASE, (unsigned long long)(IOS_GLUED_MAIN_LOW >> 30), IOS_SC_BRP_HOLD_BASE, (unsigned long long)(IOS_SC_BRP_HOLD_SIZE >> 30) );
++    return STATUS_SUCCESS;
++}
++
++
+ #ifdef WINE_IOS
+ /* ml1298: an unhinted reserve too big for the address map, served in part.
+  *
+@@ -30370,6 +30440,9 @@
+                     goto sc_decided;
+                 if (!sc2 && sc_helper && *size_ptr == 0x800000000ULL && !((ULONG_PTR)hint & (0x800000000ULL - 1)))
+                     st2 = ios_sc_glued_pools( &pick, &sz, type, protect );
++                /* 0152: the game's own process (BeamNG.drive's Chromium) asks the same, and gets the glued pool in two real parts. */
++                else if (!sc2 && !sc_helper && ios_glued_main() && *size_ptr == 0x800000000ULL && !((ULONG_PTR)hint & (0x800000000ULL - 1)))
++                    st2 = ios_glued_main_grant( &pick, &sz, type, protect );
+                 if (st2 && off)
+                 {
+                     for (slot = guard_first; slot <= 0x7C00000000ULL && st2; slot += align_unit)
+@@ -30517,7 +30590,9 @@
+                     uint64_t slot;
+                     int pa32_decline = 0;
+                     /* 0108: a random-hint 16GB ask (not the guard layout) is served from the map's biggest hole, with its first part real */
+-                    if (ios_pa32_soft_enabled() && *size_ptr < 0x800000000ULL && off && off < align_unit - 0x100000)
++                    /* 0152: also for the game's own process under MADEIRA_GLUED_MAIN=1: BeamNG.drive's PartitionAlloc asks for its 16 GB metadata region at a random hint right after
++                     * its pool block (jumbo#2 of the 2026-10-16 02:06 log, hint 0x1beda1a60000) and the slot-relative answer 0x71a1a60000 had nothing behind it (commit 0xc0000019). */
++                    if ((ios_pa32_soft_enabled() || ios_glued_main()) && *size_ptr < 0x800000000ULL && off && off < align_unit - 0x100000)
+                     {
+                         void *pb = NULL;
+                         if (ios_pa32_soft_back( *size_ptr, type, protect, &pb ) == STATUS_SUCCESS) { *ret = pb; st = STATUS_SUCCESS; }

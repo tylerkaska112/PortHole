@@ -40,6 +40,8 @@ PY
 
 # The engine record must match the source (a changed Madeira pin, patch or runtime needs `tools/engine.sh bump`), or the badges would be wrong.
 tools/engine.sh check || exit 1
+# The staged runtime must be the one this build folder holds (a stale stage ships an old engine without any other sign).
+tools/check_stage.sh || exit 1
 
 echo "▸ Releasing $VERSION ($BUILD) to $DATA"
 ( cd app && xcodegen generate >/dev/null )

@@ -1,0 +1,36 @@
+diff -ruN a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+--- a/build/ntdll-unix/virtual_ios.c	2026-10-16 03:21:52
++++ b/build/ntdll-unix/virtual_ios.c	2026-10-16 03:21:52
+@@ -20858,6 +20858,32 @@
+             start = address_space_start;
+             end = min( user_space_limit, host_addr_space_limit );
+             if (limit_low && (void *)limit_low > start) start = (void *)limit_low;
++#ifdef WINE_IOS
++            /* 0154: with MADEIRA_CAGE_RELEASE=1 the unclaimed 8 GB V8 cage holdback is also offered to a request
++             * that only the relaxed window can serve. ios_cage_release_on_exhaustion above sees the CLAMPED window
++             * (it ends at the furniture ceiling, far below the holdback), so it could never fire for a program that
++             * reserves 4 GB-aligned memory freely: Ultralight (BeamNG.drive's own UI, WebCore.dll) asks for 4 GB,
++             * 2 GB, 1 GB ... down to its 32 MB minimum, each 4 GB-aligned, and every ask failed because the kernel
++             * pick below needs the size PLUS 4 GB of alignment slack and the largest host hole is 3.9 GB. */
++            {
++                const char *cr = getenv( "MADEIRA_CAGE_RELEASE" );
++
++                if (cr && cr[0] == '1' && !cr[1])
++                {
++                    static unsigned long cr_n;
++                    int handed = ios_cage_release_on_exhaustion( start, end, view_size );
++
++                    if ((ptr = map_reserved_area( start, end, host_size, top_down, unix_prot, align_mask )))
++                    {
++                        if (++cr_n <= 8 || !(cr_n % 256))
++                            dprintf( 2, "[cage] 0154 #%lu relaxed window: 0x%lx bytes (align 0x%llx) placed at %p in a reserved area%s\n",
++                                     cr_n, (unsigned long)size, (unsigned long long)(align_mask + 1), ptr,
++                                     handed ? " (the holdback was handed over for it)" : "" );
++                        goto done;
++                    }
++                }
++            }
++#endif
+         }
+ 
+         for (;;)

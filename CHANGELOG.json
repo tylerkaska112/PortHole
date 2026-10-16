@@ -1,5 +1,21 @@
 [
   {
+    "version": "1.0.1",
+    "build": "500",
+    "summary": "BeamNG.drive starts and can be played (early support).",
+    "added": [
+      "BeamNG.drive (Steam, version 0.39.4.0) starts, shows its menus, loads maps and drives. It needs one extra file that Porthole cannot supply: Ultralight's ICU data, icudt67l.dat, copied into the game's ultralight folder. docs/GAME_FIXES.md says where to get it and where it goes.",
+      "A BeamNG.drive game fix, applied automatically: the game is started with its own switch for the menu engine that does not use Chromium (-forceUltralight), and the memory layout, no-copy image loading and lock settings it needs are set for that launch only."
+    ],
+    "changed": [
+      "New game engine version (279fd0f-r13): compatibility badges start fresh for it, and older reports stay visible as earlier ones. Most of the engine changes are switched on only for BeamNG.drive's launch; the monitor fix below applies to every game.",
+      "Game fixes that set a file aside now also apply to games started through Steam, and match the file name whatever its capitals; the log says where a fix looked when it found nothing."
+    ],
+    "fixed": [
+      "Borderless and fullscreen windows: a game that asks Windows for its monitor with a handle the engine does not know now gets the screen's size instead of an error. BeamNG.drive set its window to 0 by 0 in Borderless and showed an empty desktop with sound."
+    ]
+  },
+  {
     "version": "1.0.0",
     "build": "480",
     "summary": "Porthole 1.0.0: the first public release.",
